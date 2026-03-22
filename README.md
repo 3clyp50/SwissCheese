@@ -1,12 +1,35 @@
 # SwissCheese
 
-SwissCheese is a conversation-level resilience harness for Agent Zero. It treats failures as system-plus-process problems and keeps `Aviate, Navigate, Communicate` inside a fuller barrier stack:
+SwissCheese is a conversation-level resilience harness for Agent Zero inspired by aviation mental models. It treats AI failures as system-plus-process problems and keeps `Aviate, Navigate, Communicate` inside a fuller barrier stack:
 
 1. `Prepare`
 2. `Aviate`
 3. `Navigate`
 4. `Communicate`
 5. `Learn`
+
+## Why This Exists
+
+A $400 million aircraft has a context window too, it's called the flight
+crew's working memory. Aviation solved the "humans forget things under
+cognitive load" problem decades ago with checklists, annunciator panels,
+and a culture that treats forgetting as a system failure, not a personal
+one.
+
+AI chats and coding sessions took a different approach: they gave you a 200k-token
+context window with no gauges, no warnings, and an assistant that will
+always agree it remembers everything while silently dropping your
+requirements behind your back. Yes, you're absolutely right.
+
+The author has ADHD. This means that somewhere around the 100k token mark, both
+participants in the conversation, the human and the LLM, are operating
+on vibes and pattern-matching, and neither one is going to be the adult in
+the room. Projects drift. Code patterns contradict themselves. The model
+starts solving problems it already solved, differently. It's the Swiss
+cheese model of failure in real time, except nobody built the annunciator
+panel.
+
+Until now.
 
 ## Vocabulary
 

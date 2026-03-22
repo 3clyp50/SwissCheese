@@ -1,0 +1,146 @@
+# SwissCheese Plugin Plan
+
+## Objective
+- Build a local, community-ready plugin at [usr/plugins/swiss_cheese](a0/agent-zero/usr/plugins/swiss_cheese). Do not create the external GitHub repo or Plugin Index submission yet.
+- Use runtime/plugin name `swiss_cheese` and UI title `SwissCheese`.
+- Make SwissCheese a conversation-level resilience harness for Agent Zero: it should inspect the active conversation with the utility model, detect holes in the workflow, maintain corrective checklists, expose situational-awareness tools, and queue bounded self-followups.
+- Preserve `Aviate, Navigate, Communicate` as the operational triage core, but embed it inside a fuller Swiss Cheese safety stack.
+
+## Framework grounding
+- Use James Reason’s system approach, not a blame-first model: focus on defenses, barriers, safeguards, active failures, latent conditions, shifting holes, near misses, and recovery. Source: [PMC/BMJ, 2000](https://pmc.ncbi.nlm.nih.gov/articles/PMC1117770/).
+- In plugin vocabulary, define these terms explicitly and consistently:
+  - `slice` or `barrier`: a defense layer
+  - `hole`: a current weakness in that layer
+  - `trajectory`: the path from user intent to harmful or low-quality outcome
+  - `near_miss`: a trajectory that was trapped before damage
+  - `active_failure`: a visible model behavior in the current turn
+  - `latent_condition`: an upstream setup/process weakness that makes failure more likely
+- Keep `Aviate, Navigate, Communicate`, but structure the barrier stack as:
+  - `Prepare`: upstream configuration and readiness
+  - `Aviate`: stabilize the current task
+  - `Navigate`: restore situational awareness
+  - `Communicate`: clarify, log, queue, and hand off
+  - `Learn`: record near misses and recurring patterns for later turns
+- Because the Swiss cheese metaphor is widely interpreted inconsistently, codify its meanings in the README, system prompt, tool outputs, and dashboard rather than relying on intuition. Source: [BMC Health Services Research, 2005](https://link.springer.com/article/10.1186/1472-6963-5-71).
+- Aviation-specific enrichment to preserve:
+  - Swiss cheese as risk stacking and compounding hazards: [AOPA Air Safety Institute](https://www.aopa.org/news-and-media/all-news/2023/june/pilot/asi-safety-tip-swiss-cheese)
+  - `Aviate, Navigate, Communicate` as task prioritization under high workload: [FAA “Fly the Aircraft First”](https://www.faa.gov/sites/faa.gov/files/2022-01/Fly%20the%20Aircraft%20First.pdf) and [FAA #FlySafe guidance](https://www.faa.gov/newsroom/fly-safe-addressing-ga-safety-2)
+- Inference for agent architecture: recent FM-agent safety literature supports Swiss-cheese-style multi-layer runtime guardrails across goals, plans, tools, and artifacts; use that as architectural support, but keep aviation reasoning primary. Source: [arXiv:2408.02205](https://arxiv.org/abs/2408.02205).
+
+## Product behavior
+- Gate SwissCheese-driven autonomy until the active chat model’s `ctx_length` has been explicitly confirmed by the user.
+- If configured context length is above `128000`, show a best-practice advisory that SwissCheese should normally target a working envelope of `<=100000` tokens unless the user deliberately overrides that guidance.
+- Track utility-model context length too, but treat missing confirmation there as a warning and confidence downgrade, not the hard autonomy gate.
+- Audit every assistant turn with the utility model using structured JSON output. Inputs must include:
+  - recent conversation history
+  - current context window snapshot
+  - current reasoning/response evidence
+  - open holes
+  - open todos
+  - current project/chat scope
+- Detect at minimum:
+  - low-energy effort
+  - gaming or fake-progress patterns
+  - sycophancy
+  - premature completion
+  - skipped verification
+  - tool misuse or unsafe tool selection
+  - context-window blindness
+  - redundant or self-looping followups
+  - cross-chat alignment drift
+- Treat issues as system-plus-process phenomena. Recovery prompts must be corrective and procedural, not punitive.
+- Add bounded self-recovery:
+  - dedupe queued followups by fingerprint
+  - cap automatic recovery cycles
+  - only auto-send after the chat is idle
+  - never allow infinite same-message loops
+- Support multi-chat orchestration with scoped settings:
+  - global default: `off`
+  - project/agent scopes may enable `same_project_live_write`
+  - project/agent scopes may enable `same_project_persisted_readonly`
+  - cross-project orchestration remains `off` unless explicitly enabled in that scope
+- Add model-facing tools under `swiss_cheese:<method>`:
+  - `status`
+  - `context_window`
+  - `todo_add`
+  - `todo_list`
+  - `todo_resolve`
+  - `todo_clear_completed`
+  - `inspect_chat`
+  - `queue_followup`
+
+## Implementation outline
+- Create the plugin skeleton with `plugin.yaml`, `default_config.yaml`, `README.md`, `helpers/`, `tools/`, `api/`, `extensions/python/`, `webui/`, and `tests/`.
+- Implement against the current runtime modules:
+  - [helpers/plugins.py](a0/agent-zero/helpers/plugins.py)
+  - [helpers/extension.py](a0/agent-zero/helpers/extension.py)
+  - [helpers/message_queue.py](a0/agent-zero/helpers/message_queue.py)
+  - [helpers/persist_chat.py](a0/agent-zero/helpers/persist_chat.py)
+- Use these extension points:
+  - `system_prompt`: inject SwissCheese doctrine, definitions, and tool instructions
+  - `message_loop_prompts_after`: inject a compact SwissCheese state block into the prompt
+  - `reasoning_stream_chunk` and `response_stream_chunk`: collect turn evidence
+  - `response_stream_end`: launch the background SwissCheese audit
+  - `tool_execute_before`: block only SwissCheese-generated autonomy when the gate is active or the next step is explicitly unsafe
+  - `process_chain_end`: schedule deduped queued recovery with `mq.send_next(context)` once the chat is idle
+- Store per-context state in `context.data` and `output_data`:
+  - `swiss_cheese_state`
+  - `holes`
+  - `todos`
+  - `near_misses`
+  - `audit_status`
+  - `recovery_budget`
+  - `ctx_confirmation`
+  - `cross_chat_scope`
+- Use an explicit hole taxonomy:
+  - `active_failure`: sycophancy, low-energy effort, gaming, skipped verification, unsafe tool use, premature “done”
+  - `latent_condition`: wrong ctx limit, excessive context occupancy, missing success criteria, stale assumptions, project mismatch, disabled orchestration scope
+- Context-window support:
+  - read configured limits from `_model_config`
+  - read the live prompt snapshot already stored in [agent.py](a0/agent-zero/agent.py)
+  - expose `hard_limit`, `preferred_working_limit`, `current_tokens`, and `remaining_budget` to both the model and the UI
+  - in the questionnaire UI, show the current provider/model and generate a suggested search query such as `"provider model_name context window tokens"` for manual web verification
+- Chat inspection:
+  - search both live `AgentContext` objects and persisted `usr/chats/<context_id>/chat.json`
+  - resolve by exact `context_id`, then exact `name`, then fuzzy name
+  - only live chats may receive queued followups; persisted-only chats stay read-only until reopened
+- UI:
+  - `webui/config.html`: settings, ctx questionnaire, orchestration scope, advisory thresholds, recovery budget
+  - `webui/main.html` plus store: defense layers, current holes, near misses, todos, queue status, chat inspector, audit trace
+  - one sidebar quick action to open the dashboard
+  - follow Agent Zero frontend rules: store gate, `createStore`, notifications, no inline error boxes
+
+## Test plan
+- Manifest and scoped-config tests for global, project, and agent precedence.
+- Context gate tests:
+  - unconfirmed chat-model ctx blocks SwissCheese autonomy
+  - confirmed state unblocks it
+  - `>128k` config yields the `100k` advisory
+- Audit tests:
+  - structured JSON parsing
+  - heuristic fallback when model output is malformed
+  - hole classification
+  - severity scoring
+  - deduped recovery generation
+- Queue tests:
+  - bounded auto-recovery
+  - idle-only auto-send
+  - no infinite self-loop
+  - no duplicate recovery fingerprints
+- Tool tests:
+  - `status`
+  - `context_window`
+  - todo lifecycle
+  - chat inspection
+  - live-chat-only queueing
+- Chat discovery tests across live contexts and persisted `usr/chats/<id>/chat.json`.
+- UI/API tests:
+  - questionnaire writes `_model_config`
+  - dashboard state reflects holes, todos, near misses, and gate status
+
+## Assumptions and defaults
+- Runtime/plugin name is `swiss_cheese`; display title is `SwissCheese`.
+- No new dependencies.
+- Global default orchestration is `off`; project or agent scopes may selectively enable it.
+- The SwissCheese hard gate applies to SwissCheese-generated autonomous continuation, not to normal user-initiated chat activity.
+- Community packaging is deferred, but the local plugin should be cleanly extractable later.
