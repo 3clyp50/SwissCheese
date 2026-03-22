@@ -1,0 +1,18 @@
+preferred_working_limit: 100000
+advisory_threshold: 128000
+allow_large_context_override: false
+utility_confirmation_warning: true
+max_auto_recovery_cycles: 2
+max_holes: 12
+max_near_misses: 20
+max_todos: 20
+max_audit_traces: 20
+max_followup_queue: 8
+audit_history_messages: 10
+cross_chat_scope:
+  same_project_live_write: false
+  same_project_persisted_readonly: false
+  cross_project: false
+confirmed_model_tuples:
+  chat_model: []
+  utility_model: []

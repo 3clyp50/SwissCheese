@@ -1,0 +1,530 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import asyncio
+import json
+import hashlib
+from typing import TYPE_CHECKING, Any
+
+from helpers.dirty_json import DirtyJson
+from helpers import history as history_helper
+from helpers import tokens
+
+from usr.plugins.swiss_cheese.helpers import config as swiss_config
+from usr.plugins.swiss_cheese.helpers import context_window, discovery, state as state_helper
+from usr.plugins.swiss_cheese.helpers.constants import (
+    ACTIVE_FAILURE_PATTERNS,
+    AUDIT_STATUS_KEY,
+    DANGEROUS_AUTONOMOUS_PATTERNS,
+    KINDS,
+    LATENT_CONDITION_PATTERNS,
+    PLUGIN_NAME,
+    SEVERITIES,
+    TRANSIENT_AUDIT_TASK_KEY,
+    TRANSIENT_LAST_UTILITY_INPUT_KEY,
+    TRANSIENT_REASONING_KEY,
+    TRANSIENT_RESPONSE_KEY,
+)
+
+if TYPE_CHECKING:
+    from agent import Agent
+
+
+def iso_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _safe_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def collect_reasoning(agent: "Agent", full_text: str) -> None:
+    agent.set_data(TRANSIENT_REASONING_KEY, full_text or "")
+
+
+def collect_response(agent: "Agent", full_text: str) -> None:
+    agent.set_data(TRANSIENT_RESPONSE_KEY, full_text or "")
+
+
+def _recent_history_text(agent: "Agent", limit: int) -> str:
+    outputs = agent.history.output()
+    if limit > 0:
+        outputs = outputs[-limit:]
+    return history_helper.output_text(outputs, ai_label="assistant", human_label="user")
+
+
+def _build_scope_payload(agent: "Agent", plugin_config: dict[str, Any], scope: dict[str, bool]) -> dict[str, Any]:
+    project_name, agent_profile = swiss_config.get_scope_from_agent(agent)
+    return {
+        "context_id": agent.context.id,
+        "context_name": str(agent.context.name or agent.context.id),
+        "project_name": project_name,
+        "agent_profile": agent_profile,
+        "scope": scope,
+        "plugin": PLUGIN_NAME,
+        "orchestration_enabled": any(scope.values()),
+        "open_holes": agent.context.get_data("holes") or [],
+        "open_todos": agent.context.get_data("todos") or [],
+    }
+
+
+def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_status: dict[str, Any]) -> str:
+    recent_history = _recent_history_text(agent, int(plugin_config.get("audit_history_messages", 10) or 10))
+    reasoning = str(agent.get_data(TRANSIENT_REASONING_KEY) or "")
+    response = str(agent.get_data(TRANSIENT_RESPONSE_KEY) or "")
+    scope = ctx_status.get("scope", {})
+    payload = {
+        "recent_conversation_history": recent_history,
+        "current_context_window_snapshot": {
+            "chat_model": ctx_status.get("chat_model", {}),
+            "utility_model": ctx_status.get("utility_model", {}),
+            "gate_active": ctx_status.get("gate_active", False),
+            "utility_warning_active": ctx_status.get("utility_warning_active", False),
+        },
+        "current_reasoning_response_evidence": {
+            "reasoning": reasoning,
+            "response": response,
+        },
+        "open_holes": agent.context.get_data("holes") or [],
+        "open_todos": agent.context.get_data("todos") or [],
+        "current_project_chat_scope": scope,
+    }
+    return json.dumps(payload, ensure_ascii=False, indent=2)
+
+
+def _safe_json_load(text: str) -> dict[str, Any] | None:
+    if not text:
+        return None
+    try:
+        parsed = DirtyJson.parse_string(text)
+    except Exception:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _normalize_barrier(value: Any) -> str:
+    candidate = str(value or "Navigate").strip().title()
+    return candidate if candidate in ("Prepare", "Aviate", "Navigate", "Communicate", "Learn") else "Navigate"
+
+
+def _normalize_kind(value: Any) -> str:
+    candidate = str(value or "active_failure").strip().lower()
+    return candidate if candidate in KINDS else "active_failure"
+
+
+def _normalize_pattern(kind: str, pattern: Any) -> str:
+    candidate = str(pattern or "").strip().lower().replace(" ", "_")
+    allowed = ACTIVE_FAILURE_PATTERNS if kind == "active_failure" else LATENT_CONDITION_PATTERNS
+    if candidate in allowed:
+        return candidate
+    return allowed[0]
+
+
+def _normalize_severity(value: Any) -> str:
+    candidate = str(value or "medium").strip().lower()
+    return candidate if candidate in SEVERITIES else "medium"
+
+
+def _hole_id(kind: str, pattern: str, barrier: str, title: str) -> str:
+    digest = hashlib.sha1(f"{kind}|{pattern}|{barrier}|{title}".encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def _normalize_hole(raw: dict[str, Any]) -> dict[str, Any]:
+    kind = _normalize_kind(raw.get("kind"))
+    pattern = _normalize_pattern(kind, raw.get("pattern"))
+    barrier = _normalize_barrier(raw.get("barrier"))
+    title = str(raw.get("title", pattern.replace("_", " ").title())).strip()
+    return {
+        "id": _hole_id(kind, pattern, barrier, title),
+        "kind": kind,
+        "pattern": pattern,
+        "barrier": barrier,
+        "title": title,
+        "severity": _normalize_severity(raw.get("severity")),
+        "confidence": max(min(_safe_float(raw.get("confidence"), 0.5), 1.0), 0.0),
+        "evidence": str(raw.get("evidence", "")).strip(),
+        "trajectory": str(raw.get("trajectory", "")).strip(),
+        "near_miss": bool(raw.get("near_miss", False)),
+        "todo": str(raw.get("todo", "")).strip(),
+    }
+
+
+def _normalize_todo(raw: dict[str, Any], hole: dict[str, Any] | None = None) -> dict[str, Any]:
+    title = str(raw.get("title", "")).strip() or (hole.get("todo", "") if hole else "")
+    detail = str(raw.get("detail", "")).strip()
+    hole_id = str(raw.get("hole_id", "")).strip() or (hole.get("id", "") if hole else "")
+    digest = hashlib.sha1(f"{title}|{detail}|{hole_id}".encode("utf-8")).hexdigest()
+    return {
+        "id": digest[:12],
+        "title": title,
+        "detail": detail,
+        "severity": _normalize_severity(raw.get("severity") or (hole.get("severity", "medium") if hole else "medium")),
+        "source": str(raw.get("source", "audit") or "audit"),
+        "status": str(raw.get("status", "open") or "open"),
+        "hole_id": hole_id,
+    }
+
+
+def _normalize_near_miss(raw: dict[str, Any]) -> dict[str, Any]:
+    title = str(raw.get("title", "Near miss")).strip()
+    detail = str(raw.get("detail", "")).strip()
+    digest = hashlib.sha1(f"{title}|{detail}".encode("utf-8")).hexdigest()
+    return {
+        "id": digest[:12],
+        "title": title,
+        "detail": detail,
+        "barrier": _normalize_barrier(raw.get("barrier")),
+        "severity": _normalize_severity(raw.get("severity")),
+        "confidence": max(min(_safe_float(raw.get("confidence"), 0.75), 1.0), 0.0),
+        "created_at": str(raw.get("created_at", iso_now())),
+        "fingerprint": str(raw.get("fingerprint", "")),
+    }
+
+
+def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, Any]:
+    reasoning = str(agent.get_data(TRANSIENT_REASONING_KEY) or "")
+    response = str(agent.get_data(TRANSIENT_RESPONSE_KEY) or "")
+    holes: list[dict[str, Any]] = []
+    todos: list[dict[str, Any]] = []
+
+    chat_window = ctx_status.get("chat_model", {})
+    if int(chat_window.get("current_tokens", 0) or 0) > int(chat_window.get("preferred_working_limit", 0) or 0):
+        holes.append(
+            {
+                "kind": "latent_condition",
+                "pattern": "excessive_context_occupancy",
+                "barrier": "Prepare",
+                "severity": "high",
+                "confidence": 0.95,
+                "title": "Working envelope exceeded",
+                "evidence": f"current_tokens={chat_window.get('current_tokens')} preferred={chat_window.get('preferred_working_limit')}",
+                "trajectory": "Large active context can hide constraints and verification evidence.",
+                "todo": "Trim or summarize the active scope before continuing.",
+            }
+        )
+
+    if not ctx_status.get("chat_model", {}).get("confirmed", False):
+        holes.append(
+            {
+                "kind": "latent_condition",
+                "pattern": "chat_ctx_unconfirmed",
+                "barrier": "Prepare",
+                "severity": "high",
+                "confidence": 1.0,
+                "title": "Chat context length is unconfirmed",
+                "evidence": "SwissCheese autonomy is gated until the active chat model context length is explicitly confirmed.",
+                "trajectory": "Autonomous continuation may outrun the verified token budget.",
+                "todo": "Confirm the active chat model context length before auto-recovery runs.",
+            }
+        )
+
+    lower_response = response.lower()
+    if any(term in lower_response for term in ("done", "completed", "finished")) and not any(
+        marker in lower_response for marker in ("test", "verified", "pytest", "read", "diff")
+    ):
+        holes.append(
+            {
+                "kind": "active_failure",
+                "pattern": "premature_done",
+                "barrier": "Aviate",
+                "severity": "medium",
+                "confidence": 0.8,
+                "title": "Premature completion language",
+                "evidence": response[:240],
+                "trajectory": "The response claims completion without visible verification evidence.",
+                "todo": "Verify the claimed outcome before closing the task.",
+            }
+        )
+
+    if any(term in lower_response for term in ("fixed", "implemented", "resolved")) and not any(
+        marker in (reasoning + "\n" + response).lower()
+        for marker in ("pytest", "verified", "checked", "read", "inspection", "test")
+    ):
+        holes.append(
+            {
+                "kind": "active_failure",
+                "pattern": "skipped_verification",
+                "barrier": "Navigate",
+                "severity": "medium",
+                "confidence": 0.85,
+                "title": "Verification likely skipped",
+                "evidence": response[:240],
+                "trajectory": "Unverified success claims can hide regressions or partial work.",
+                "todo": "Run an explicit verification step or call out that verification was not performed.",
+            }
+        )
+
+    if agent.context.get_data("_swiss_cheese_autonomy_origin"):
+        auto_origin = agent.context.get_data("_swiss_cheese_autonomy_origin") or {}
+        if str(auto_origin.get("fingerprint", "")) == str((agent.context.get_data("swiss_cheese_state") or {}).get("last_followup_fingerprint", "")):
+            holes.append(
+                {
+                    "kind": "active_failure",
+                    "pattern": "gaming_fake_progress",
+                    "barrier": "Communicate",
+                    "severity": "medium",
+                    "confidence": 0.9,
+                    "title": "Redundant autonomous followup loop",
+                    "evidence": json.dumps(auto_origin, ensure_ascii=False),
+                    "trajectory": "Repeating the same autonomous followup can create self-loops instead of progress.",
+                    "todo": "Stop repeating the same followup and request clarification or a new plan.",
+                }
+            )
+
+    for hole in holes:
+        if hole.get("todo"):
+            todos.append(
+                {
+                    "title": hole["todo"],
+                    "detail": hole.get("trajectory", ""),
+                    "severity": hole.get("severity", "medium"),
+                    "source": "heuristic_fallback",
+                }
+            )
+
+    return {
+        "summary": "Heuristic fallback audit completed.",
+        "confidence": 0.75,
+        "holes": holes,
+        "todos": todos,
+        "near_misses": [],
+        "followups": [],
+    }
+
+
+def _parse_or_fallback(agent: "Agent", response: str, ctx_status: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    parsed = _safe_json_load(response)
+    if parsed is not None:
+        return parsed, False
+    return _heuristic_result(agent, ctx_status), True
+
+
+def _apply_audit_result(
+    agent: "Agent",
+    payload: dict[str, Any],
+    *,
+    ctx_status: dict[str, Any],
+    used_fallback: bool,
+    plugin_config: dict[str, Any],
+) -> None:
+    normalized_holes = [_normalize_hole(item) for item in payload.get("holes", []) if isinstance(item, dict)]
+    state_helper.set_holes(agent.context, normalized_holes, plugin_config=plugin_config)
+
+    for hole in normalized_holes:
+        if hole.get("todo"):
+            state_helper.add_or_update_todo(
+                agent.context,
+                _normalize_todo({"title": hole["todo"], "detail": hole.get("trajectory", ""), "severity": hole.get("severity")}, hole=hole),
+                plugin_config=plugin_config,
+            )
+
+    for raw_todo in payload.get("todos", []):
+        if isinstance(raw_todo, dict):
+            state_helper.add_or_update_todo(
+                agent.context,
+                _normalize_todo(raw_todo),
+                plugin_config=plugin_config,
+            )
+
+    for raw_near_miss in payload.get("near_misses", []):
+        if isinstance(raw_near_miss, dict):
+            state_helper.record_near_miss(
+                agent.context,
+                _normalize_near_miss(raw_near_miss),
+                plugin_config=plugin_config,
+            )
+
+    audit_trace_entry = {
+        "created_at": iso_now(),
+        "summary": str(payload.get("summary", "SwissCheese audit completed.")).strip(),
+        "used_fallback": used_fallback,
+        "hole_patterns": [hole.get("pattern", "") for hole in normalized_holes],
+    }
+    state_helper.append_audit_trace(agent.context, audit_trace_entry, plugin_config=plugin_config)
+
+    state_helper.set_audit_status(
+        agent.context,
+        {
+            "state": "complete",
+            "summary": audit_trace_entry["summary"],
+            "used_fallback": used_fallback,
+            "last_error": "",
+            "last_audit_at": audit_trace_entry["created_at"],
+        },
+        plugin_config=plugin_config,
+    )
+
+    for raw_followup in payload.get("followups", []):
+        if not isinstance(raw_followup, dict):
+            continue
+        reason = str(raw_followup.get("reason", "")).strip()
+        message = str(raw_followup.get("message", "")).strip()
+        if not reason or not message:
+            continue
+        target = str(raw_followup.get("target", "current_chat") or "current_chat")
+        auto_send = bool(raw_followup.get("auto_send", False))
+        target_context_id = agent.context.id
+        if target != "current_chat":
+            inspection = discovery.inspect_chat(
+                source_context=agent.context,
+                selector=target,
+                scope=agent.context.get_data("cross_chat_scope") or {},
+            )
+            target_meta = inspection.get("target") or {}
+            if not inspection.get("permissions", {}).get("can_queue", False):
+                state_helper.record_near_miss(
+                    agent.context,
+                    {
+                        "title": "Followup queue blocked",
+                        "detail": f"SwissCheese rejected queued followup for target '{target}'.",
+                        "barrier": "Communicate",
+                        "severity": "medium",
+                        "confidence": 1.0,
+                    },
+                    plugin_config=plugin_config,
+                )
+                continue
+            target_context_id = str(target_meta.get("id", agent.context.id))
+        queued, info = state_helper.queue_followup(
+            agent.context,
+            target_context_id=target_context_id,
+            reason=reason,
+            message=message,
+            auto_send=auto_send,
+            source="audit",
+            plugin_config=plugin_config,
+        )
+        if not queued:
+            state_helper.record_near_miss(
+                agent.context,
+                {
+                    "title": "Followup deduplicated",
+                    "detail": f"SwissCheese rejected followup '{reason}' because {info.get('reason', 'it was not allowed')}.",
+                    "barrier": "Communicate",
+                    "severity": "low",
+                    "confidence": 1.0,
+                    "fingerprint": info.get("fingerprint", ""),
+                },
+                plugin_config=plugin_config,
+            )
+
+
+async def run_background_audit(agent: "Agent") -> None:
+    if agent.number != 0:
+        return
+
+    plugin_config = swiss_config.get_plugin_config(agent)
+    state_helper.set_audit_status(
+        agent.context,
+        {"state": "pending", "summary": "SwissCheese audit running...", "used_fallback": False},
+        plugin_config=plugin_config,
+    )
+
+    system_prompt = agent.read_prompt("swiss_cheese.audit.sys.md")
+    ctx_status = context_window.compute_context_window_status(agent, plugin_config=plugin_config)
+    ctx_status["scope"] = _build_scope_payload(
+        agent,
+        plugin_config,
+        agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {}),
+    )
+    provisional_user_message = _build_audit_message(agent, plugin_config, ctx_status)
+    agent.context.set_data(
+        TRANSIENT_LAST_UTILITY_INPUT_KEY,
+        {
+            "tokens": tokens.approximate_tokens(system_prompt + "\n" + provisional_user_message),
+            "captured_at": iso_now(),
+        },
+    )
+    ctx_status = context_window.compute_context_window_status(agent, plugin_config=plugin_config)
+    ctx_status["scope"] = _build_scope_payload(
+        agent,
+        plugin_config,
+        agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {}),
+    )
+    user_message = _build_audit_message(agent, plugin_config, ctx_status)
+    agent.context.set_data(
+        TRANSIENT_LAST_UTILITY_INPUT_KEY,
+        {
+            "tokens": tokens.approximate_tokens(system_prompt + "\n" + user_message),
+            "captured_at": iso_now(),
+        },
+    )
+
+    try:
+        response = await agent.call_utility_model(
+            system=system_prompt,
+            message=user_message,
+            background=True,
+        )
+        parsed, used_fallback = _parse_or_fallback(agent, response, ctx_status)
+        _apply_audit_result(
+            agent,
+            parsed,
+            ctx_status=ctx_status,
+            used_fallback=used_fallback,
+            plugin_config=plugin_config,
+        )
+    except Exception as exc:
+        fallback_payload = _heuristic_result(agent, ctx_status)
+        _apply_audit_result(
+            agent,
+            fallback_payload,
+            ctx_status=ctx_status,
+            used_fallback=True,
+            plugin_config=plugin_config,
+        )
+        state_helper.set_audit_status(
+            agent.context,
+            {
+                "state": "fallback",
+                "summary": "SwissCheese audit used heuristic fallback.",
+                "used_fallback": True,
+                "last_error": str(exc),
+                "last_audit_at": iso_now(),
+            },
+            plugin_config=plugin_config,
+        )
+    finally:
+        agent.set_data(TRANSIENT_AUDIT_TASK_KEY, None)
+
+
+def schedule_background_audit(agent: "Agent") -> asyncio.Task | None:
+    if agent.number != 0:
+        return None
+    existing = agent.get_data(TRANSIENT_AUDIT_TASK_KEY)
+    if existing and not existing.done():
+        return existing
+    task = asyncio.create_task(run_background_audit(agent))
+    agent.set_data(TRANSIENT_AUDIT_TASK_KEY, task)
+    return task
+
+
+def should_block_autonomous_tool(agent: "Agent", tool_name: str) -> tuple[bool, str]:
+    origin = agent.context.get_data("_swiss_cheese_autonomy_origin") or {}
+    if not origin:
+        return False, ""
+    ctx_confirmation = agent.context.get_data("ctx_confirmation") or {}
+    if ctx_confirmation.get("gate_active", False):
+        return True, "chat_ctx_confirmation_gate"
+
+    holes = agent.context.get_data("holes") or []
+    if any(
+        hole.get("pattern") in DANGEROUS_AUTONOMOUS_PATTERNS
+        and hole.get("severity") in ("high", "critical")
+        for hole in holes
+        if isinstance(hole, dict)
+    ):
+        return True, "unsafe_autonomous_followup"
+
+    return False, ""

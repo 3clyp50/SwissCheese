@@ -1,0 +1,8 @@
+name: swiss_cheese
+title: SwissCheese
+description: Conversation-level resilience harness for Agent Zero.
+version: 0.1.0
+settings_sections:
+  - agent
+per_project_config: true
+per_agent_config: true

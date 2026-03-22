@@ -1,0 +1,281 @@
+<html>
+<head>
+  <title>SwissCheese</title>
+  <script type="module">
+    import * as api from "/js/api.js";
+    import {
+      toastFrontendError,
+      toastFrontendSuccess,
+      toastFrontendInfo,
+    } from "/components/notifications/notification-store.js";
+
+    window.createSwissCheeseConfigModel = (context, config) => ({
+      modelSnapshot: null,
+      loadingSnapshot: false,
+      chatConfirmValue: "",
+      utilityConfirmValue: "",
+
+      async loadScopeSnapshot() {
+        this.loadingSnapshot = true;
+        try {
+          const response = await api.callJsonApi("/plugins/_model_config/model_config_get", {
+            project_name: context.projectName || "",
+            agent_profile: context.agentProfileKey || "",
+          });
+          this.modelSnapshot = response || null;
+          this.chatConfirmValue = String(response?.config?.chat_model?.ctx_length || "");
+          this.utilityConfirmValue = String(response?.config?.utility_model?.ctx_length || "");
+        } catch (error) {
+          void toastFrontendError(error?.message || "Failed to load model snapshot", "SwissCheese");
+        } finally {
+          this.loadingSnapshot = false;
+        }
+      },
+
+      initDefaults() {
+        if (!config.cross_chat_scope) {
+          config.cross_chat_scope = {
+            same_project_live_write: false,
+            same_project_persisted_readonly: false,
+            cross_project: false,
+          };
+        }
+        if (!config.confirmed_model_tuples) {
+          config.confirmed_model_tuples = {
+            chat_model: [],
+            utility_model: [],
+          };
+        }
+      },
+
+      searchQueryFor(slot) {
+        const model = this.modelSnapshot?.config?.[slot] || {};
+        const provider = model.provider || "";
+        const name = model.name || "";
+        return `"${[provider, name, "context window tokens"].filter(Boolean).join(" ")}"`;
+      },
+
+      async confirmSlot(slot) {
+        const snapshot = this.modelSnapshot?.config?.[slot] || {};
+        const value = slot === "chat_model" ? this.chatConfirmValue : this.utilityConfirmValue;
+        const ctxLength = parseInt(value || "0", 10);
+        if (!snapshot.provider || !snapshot.name || !ctxLength) {
+          void toastFrontendInfo("Provider, model name, and context length are required before confirmation.", "SwissCheese");
+          return;
+        }
+
+        try {
+          await api.callJsonApi("/plugins/swiss_cheese/swiss_cheese", {
+            action: "confirm_ctx_window",
+            project_name: context.projectName || "",
+            agent_profile: context.agentProfileKey || "",
+            slot,
+            provider: snapshot.provider,
+            name: snapshot.name,
+            ctx_length: ctxLength,
+            update_model_config: true,
+          });
+          await this.loadScopeSnapshot();
+          void toastFrontendSuccess(`Confirmed ${slot.replace("_", " ")}`, "SwissCheese");
+        } catch (error) {
+          void toastFrontendError(error?.message || "Failed to confirm context window", "SwissCheese");
+        }
+      },
+    });
+  </script>
+</head>
+<body>
+  <div
+    x-data="createSwissCheeseConfigModel(context, config)"
+    x-init="
+      initDefaults();
+      await loadScopeSnapshot();
+      $watch('context.projectName', async () => { await loadScopeSnapshot(); });
+      $watch('context.agentProfileKey', async () => { await loadScopeSnapshot(); });
+    "
+  >
+    <template x-if="config">
+      <div class="swiss-config">
+        <div class="section-title">SwissCheese</div>
+        <div class="section-description">
+          SwissCheese is the resilience harness for the active conversation. It tracks holes, context-window confidence, bounded recovery, and same-project orchestration scope.
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Preferred working limit</div>
+            <div class="field-description">Best-practice working envelope for SwissCheese state and advisories.</div>
+          </div>
+          <div class="field-control">
+            <input type="number" min="1" x-model.number="config.preferred_working_limit">
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Advisory threshold</div>
+            <div class="field-description">Above this configured context length, SwissCheese warns that the normal working envelope should stay at or below the preferred limit.</div>
+          </div>
+          <div class="field-control">
+            <input type="number" min="1" x-model.number="config.advisory_threshold">
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Allow large-context override</div>
+            <div class="field-description">Explicitly acknowledge that this scope may deliberately exceed the normal SwissCheese working-envelope guidance.</div>
+          </div>
+          <div class="field-control">
+            <label class="toggle">
+              <input type="checkbox" x-model="config.allow_large_context_override">
+              <span class="toggler"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Automatic recovery budget</div>
+            <div class="field-description">Maximum bounded recovery cycles per explicit user turn.</div>
+          </div>
+          <div class="field-control">
+            <input type="number" min="0" max="5" x-model.number="config.max_auto_recovery_cycles">
+          </div>
+        </div>
+
+        <div class="section-title">Orchestration Scope</div>
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Same-project live write</div>
+            <div class="field-description">Allow bounded followups to other live chats in the same project.</div>
+          </div>
+          <div class="field-control">
+            <label class="toggle">
+              <input type="checkbox" x-model="config.cross_chat_scope.same_project_live_write">
+              <span class="toggler"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Same-project persisted readonly</div>
+            <div class="field-description">Allow inspecting persisted same-project chats without queueing into them.</div>
+          </div>
+          <div class="field-control">
+            <label class="toggle">
+              <input type="checkbox" x-model="config.cross_chat_scope.same_project_persisted_readonly">
+              <span class="toggler"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="field">
+          <div class="field-label">
+            <div class="field-title">Cross-project orchestration</div>
+            <div class="field-description">Keep this off unless the scope explicitly needs cross-project read/write behavior.</div>
+          </div>
+          <div class="field-control">
+            <label class="toggle">
+              <input type="checkbox" x-model="config.cross_chat_scope.cross_project">
+              <span class="toggler"></span>
+            </label>
+          </div>
+        </div>
+
+        <div class="section-title">Context Questionnaire</div>
+        <div class="section-description">
+          SwissCheese autonomy is gated until the active chat-model context length has been explicitly confirmed for this scope. Confirmations are stored as scoped `(provider, model, ctx_length)` tuples.
+        </div>
+
+        <div class="swiss-config-loading" x-show="loadingSnapshot">
+          <span class="material-symbols-outlined spinning">progress_activity</span>
+          <span>Loading active model snapshot...</span>
+        </div>
+
+        <template x-if="modelSnapshot && modelSnapshot.config">
+          <div class="swiss-questionnaire">
+            <div class="swiss-question-card">
+              <div class="swiss-question-title">Chat model</div>
+              <div class="swiss-question-detail" x-text="`${modelSnapshot.config.chat_model?.provider || ''}/${modelSnapshot.config.chat_model?.name || ''}`"></div>
+              <input type="number" min="1" x-model="chatConfirmValue">
+              <div class="swiss-question-query" x-text="searchQueryFor('chat_model')"></div>
+              <button class="btn" @click="confirmSlot('chat_model')">Confirm chat context</button>
+            </div>
+
+            <div class="swiss-question-card">
+              <div class="swiss-question-title">Utility model</div>
+              <div class="swiss-question-detail" x-text="`${modelSnapshot.config.utility_model?.provider || ''}/${modelSnapshot.config.utility_model?.name || ''}`"></div>
+              <input type="number" min="1" x-model="utilityConfirmValue">
+              <div class="swiss-question-query" x-text="searchQueryFor('utility_model')"></div>
+              <button class="btn" @click="confirmSlot('utility_model')">Confirm utility context</button>
+            </div>
+          </div>
+        </template>
+
+        <div class="section-title">Confirmation Registry</div>
+        <div class="section-description">
+          Chat tuples: <strong x-text="(config.confirmed_model_tuples.chat_model || []).length"></strong>
+          |
+          Utility tuples: <strong x-text="(config.confirmed_model_tuples.utility_model || []).length"></strong>
+        </div>
+      </div>
+    </template>
+  </div>
+
+  <style>
+    .swiss-config {
+      padding: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.9rem;
+    }
+    .swiss-config-loading {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      color: var(--color-text-secondary);
+    }
+    .swiss-questionnaire {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.9rem;
+    }
+    .swiss-question-card {
+      border: 1px solid var(--color-border);
+      border-radius: 6px;
+      padding: 0.9rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      background: var(--color-panel);
+    }
+    .swiss-question-title {
+      font-weight: 700;
+    }
+    .swiss-question-detail {
+      color: var(--color-text-secondary);
+      word-break: break-word;
+    }
+    .swiss-question-query {
+      font-family: monospace;
+      font-size: 0.85rem;
+      color: var(--color-text-secondary);
+      word-break: break-word;
+    }
+    .spinning {
+      animation: spin 1s linear infinite;
+    }
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    @media (max-width: 820px) {
+      .swiss-questionnaire {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</body>
+</html>
