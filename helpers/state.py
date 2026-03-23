@@ -38,6 +38,120 @@ def _sanitize_severity(value: str) -> str:
     return candidate if candidate in SEVERITIES else "medium"
 
 
+def _todo_title_key(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _todo_detail(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _todo_id(title: str, detail: str, hole_id: str) -> str:
+    digest = hashlib.sha1(f"{title}|{detail}|{hole_id}".encode("utf-8")).hexdigest()
+    return digest[:12]
+
+
+def _normalize_todo(todo: dict[str, Any]) -> dict[str, Any]:
+    title = " ".join(str(todo.get("title", "")).strip().split())
+    detail = _todo_detail(todo.get("detail", ""))
+    hole_id = str(todo.get("hole_id", "") or "").strip()
+    todo_id = str(todo.get("id", "") or "").strip() or _todo_id(title, detail, hole_id)
+    return {
+        "id": todo_id,
+        "title": title,
+        "detail": detail,
+        "source": str(todo.get("source", "manual") or "manual"),
+        "status": str(todo.get("status", "open") or "open"),
+        "severity": _sanitize_severity(str(todo.get("severity", "medium"))),
+        "hole_id": hole_id,
+        "updated_at": str(todo.get("updated_at", iso_now()) or iso_now()),
+    }
+
+
+def _todos_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+    left_id = str(left.get("id", "") or "").strip()
+    right_id = str(right.get("id", "") or "").strip()
+    if left_id and right_id and left_id == right_id:
+        return True
+
+    left_hole_id = str(left.get("hole_id", "") or "").strip()
+    right_hole_id = str(right.get("hole_id", "") or "").strip()
+    if left_hole_id and right_hole_id and left_hole_id == right_hole_id:
+        return True
+
+    left_title = _todo_title_key(left.get("title", ""))
+    right_title = _todo_title_key(right.get("title", ""))
+    return bool(left_title and right_title and left_title == right_title)
+
+
+def _merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+    current_severity = _sanitize_severity(str(current.get("severity", "medium")))
+    incoming_severity = _sanitize_severity(str(incoming.get("severity", "medium")))
+    current_rank = SEVERITIES.index(current_severity)
+    incoming_rank = SEVERITIES.index(incoming_severity)
+
+    current_detail = _todo_detail(current.get("detail", ""))
+    incoming_detail = _todo_detail(incoming.get("detail", ""))
+
+    preferred_detail = current_detail
+    if incoming_detail and (
+        not current_detail
+        or incoming_detail in current_detail
+        or len(incoming_detail) > len(current_detail)
+    ):
+        preferred_detail = incoming_detail
+
+    current_status = str(current.get("status", "open") or "open")
+    incoming_status = str(incoming.get("status", "open") or "open")
+    merged_status = "open" if "open" in {current_status, incoming_status} else incoming_status
+
+    current_source = str(current.get("source", "manual") or "manual")
+    incoming_source = str(incoming.get("source", "manual") or "manual")
+    source_priority = {
+        "manual": 4,
+        "tool": 3,
+        "api": 3,
+        "audit": 2,
+        "heuristic_fallback": 1,
+    }
+    merged_source = (
+        incoming_source
+        if source_priority.get(incoming_source, 0) >= source_priority.get(current_source, 0)
+        else current_source
+    )
+
+    return {
+        "id": str(current.get("id", "") or incoming.get("id", "") or "").strip()
+        or _todo_id(
+            str(current.get("title", "") or incoming.get("title", "")).strip(),
+            preferred_detail,
+            str(current.get("hole_id", "") or incoming.get("hole_id", "")).strip(),
+        ),
+        "title": str(current.get("title", "") or incoming.get("title", "")).strip(),
+        "detail": preferred_detail,
+        "source": merged_source,
+        "status": merged_status,
+        "severity": incoming_severity if incoming_rank >= current_rank else current_severity,
+        "hole_id": str(current.get("hole_id", "") or incoming.get("hole_id", "")).strip(),
+        "updated_at": str(incoming.get("updated_at", "") or current.get("updated_at", "") or iso_now()),
+    }
+
+
+def _dedupe_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    deduped: list[dict[str, Any]] = []
+    for todo in todos:
+        normalized = _normalize_todo(todo)
+        existing_index = next(
+            (idx for idx, item in enumerate(deduped) if _todos_match(item, normalized)),
+            None,
+        )
+        if existing_index is None:
+            deduped.append(normalized)
+        else:
+            deduped[existing_index] = _merge_todo_records(deduped[existing_index], normalized)
+    return deduped
+
+
 def _default_state() -> dict[str, Any]:
     return {
         "version": 1,
@@ -83,6 +197,9 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
         value = context.get_data(key)
         if not isinstance(value, list):
             context.set_data(key, [])
+            continue
+        if key == TODOS_KEY:
+            context.set_data(key, _dedupe_todos(value))
     if not isinstance(context.get_data(AUDIT_STATUS_KEY), dict):
         context.set_data(AUDIT_STATUS_KEY, _default_audit_status())
     if not isinstance(context.get_data(CTX_CONFIRMATION_KEY), dict):
@@ -224,31 +341,19 @@ def add_or_update_todo(
     plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     todos = list(context.get_data(TODOS_KEY) or [])
-    todo_id = str(todo.get("id", "") or "")
-    if not todo_id:
-        digest = hashlib.sha1(
-            f"{todo.get('title', '')}|{todo.get('detail', '')}".encode("utf-8")
-        ).hexdigest()
-        todo_id = digest[:12]
-    record = {
-        "id": todo_id,
-        "title": str(todo.get("title", "")).strip(),
-        "detail": str(todo.get("detail", "")).strip(),
-        "source": str(todo.get("source", "manual") or "manual"),
-        "status": str(todo.get("status", "open") or "open"),
-        "severity": _sanitize_severity(str(todo.get("severity", "medium"))),
-        "hole_id": str(todo.get("hole_id", "") or ""),
-        "updated_at": iso_now(),
-    }
-    existing_index = next((idx for idx, item in enumerate(todos) if item.get("id") == todo_id), None)
+    record = _normalize_todo({**todo, "updated_at": iso_now()})
+    existing_index = next((idx for idx, item in enumerate(todos) if _todos_match(item, record)), None)
     if existing_index is None:
         todos.append(record)
     else:
-        todos[existing_index] = {**todos[existing_index], **record}
+        todos[existing_index] = _merge_todo_records(_normalize_todo(todos[existing_index]), record)
+        record = todos[existing_index]
     limit = int((plugin_config or {}).get("max_todos", 20) or 20)
+    todos = _dedupe_todos(todos)
     context.set_data(TODOS_KEY, _limit(todos, limit))
     sync_output_data(context, plugin_config=plugin_config, dirty=True)
-    return record
+    current_todos = list(context.get_data(TODOS_KEY) or [])
+    return next((item for item in current_todos if _todos_match(item, record)), record)
 
 
 def resolve_todo(
@@ -256,7 +361,7 @@ def resolve_todo(
     todo_id: str,
     plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    todos = list(context.get_data(TODOS_KEY) or [])
+    todos = _dedupe_todos(list(context.get_data(TODOS_KEY) or []))
     for todo in todos:
         if todo.get("id") == todo_id:
             todo["status"] = "completed"
@@ -271,7 +376,7 @@ def clear_completed_todos(
     context: AgentContext,
     plugin_config: dict[str, Any] | None = None,
 ) -> int:
-    todos = list(context.get_data(TODOS_KEY) or [])
+    todos = _dedupe_todos(list(context.get_data(TODOS_KEY) or []))
     remaining = [todo for todo in todos if todo.get("status") != "completed"]
     context.set_data(TODOS_KEY, remaining)
     sync_output_data(context, plugin_config=plugin_config, dirty=True)

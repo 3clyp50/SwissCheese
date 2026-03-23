@@ -12,17 +12,17 @@ class SwissCheese(Tool):
 
     async def execute(self, **kwargs):
         if self.method == "status":
-            return await self._status()
+            return await self._status(**kwargs)
         if self.method == "context_window":
-            return await self._context_window()
+            return await self._context_window(**kwargs)
         if self.method == "todo_add":
             return await self._todo_add(**kwargs)
         if self.method == "todo_list":
-            return await self._todo_list()
+            return await self._todo_list(**kwargs)
         if self.method == "todo_resolve":
             return await self._todo_resolve(**kwargs)
         if self.method == "todo_clear_completed":
-            return await self._todo_clear_completed()
+            return await self._todo_clear_completed(**kwargs)
         if self.method == "inspect_chat":
             return await self._inspect_chat(**kwargs)
         if self.method == "queue_followup":
@@ -39,12 +39,20 @@ class SwissCheese(Tool):
         payload = {"summary": summary, "data": data}
         return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
-    async def _status(self) -> Response:
+    async def _status(self, detail: str = "full", **kwargs) -> Response:
         plugin_config = swiss_config.get_plugin_config(self.agent)
         state_helper.ensure_state(self.agent.context, plugin_config=plugin_config)
         ctx_status = context_window.compute_context_window_status(self.agent, plugin_config=plugin_config)
         data = state_helper.get_state_bundle(self.agent.context)
         data["context_window"] = ctx_status
+        if str(detail or "full").strip().lower() == "summary":
+            data = {
+                "audit_status": data.get("audit_status", {}),
+                "recovery_budget": data.get("recovery_budget", {}),
+                "holes": data.get("holes", []),
+                "todos": [todo for todo in data.get("todos", []) if todo.get("status") != "completed"],
+                "context_window": ctx_status,
+            }
         return Response(
             message=self._encode(
                 "SwissCheese status snapshot.",
@@ -53,11 +61,26 @@ class SwissCheese(Tool):
             break_loop=False,
         )
 
-    async def _context_window(self) -> Response:
+    async def _context_window(self, slot: str = "all", **kwargs) -> Response:
         plugin_config = swiss_config.get_plugin_config(self.agent)
         ctx_status = context_window.compute_context_window_status(self.agent, plugin_config=plugin_config)
+        normalized_slot = str(slot or "all").strip().lower()
+        if normalized_slot in ("chat", "chat_model"):
+            data = {
+                "slot": "chat",
+                "gate_active": ctx_status.get("gate_active", False),
+                "model": ctx_status.get("chat_model", {}),
+            }
+        elif normalized_slot in ("utility", "utility_model"):
+            data = {
+                "slot": "utility",
+                "utility_warning_active": ctx_status.get("utility_warning_active", False),
+                "model": ctx_status.get("utility_model", {}),
+            }
+        else:
+            data = ctx_status
         return Response(
-            message=self._encode("SwissCheese context-window snapshot.", ctx_status),
+            message=self._encode("SwissCheese context-window snapshot.", data),
             break_loop=False,
         )
 
@@ -84,12 +107,20 @@ class SwissCheese(Tool):
             break_loop=False,
         )
 
-    async def _todo_list(self) -> Response:
+    async def _todo_list(self, status: str = "open", **kwargs) -> Response:
         plugin_config = swiss_config.get_plugin_config(self.agent)
         state_helper.ensure_state(self.agent.context, plugin_config=plugin_config)
         todos = self.agent.context.get_data("todos") or []
+        normalized_status = str(status or "open").strip().lower()
+        if normalized_status in ("open", "completed"):
+            todos = [todo for todo in todos if todo.get("status") == normalized_status]
+        else:
+            normalized_status = "all"
         return Response(
-            message=self._encode("SwissCheese todos listed.", {"todos": todos}),
+            message=self._encode(
+                "SwissCheese todos listed.",
+                {"status": normalized_status, "todos": todos},
+            ),
             break_loop=False,
         )
 
@@ -108,7 +139,15 @@ class SwissCheese(Tool):
             break_loop=False,
         )
 
-    async def _todo_clear_completed(self) -> Response:
+    async def _todo_clear_completed(self, confirm: bool = False, **kwargs) -> Response:
+        if not confirm:
+            return Response(
+                message=self._encode(
+                    "Confirmation required before clearing completed SwissCheese todos.",
+                    {"ok": False},
+                ),
+                break_loop=False,
+            )
         plugin_config = swiss_config.get_plugin_config(self.agent)
         remaining = state_helper.clear_completed_todos(
             self.agent.context,

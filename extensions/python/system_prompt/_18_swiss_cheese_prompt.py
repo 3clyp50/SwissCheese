@@ -9,9 +9,11 @@ class SwissCheesePrompt(Extension):
         if not self.agent or self.agent.number != 0:
             return
         plugin_config = swiss_config.get_plugin_config(self.agent)
-        prompt = self.agent.read_prompt(
+        doctrine_prompt = self.agent.read_prompt(
             "agent.system.swiss_cheese.md",
             preferred_working_limit=str(plugin_config.get("preferred_working_limit", 100000)),
             advisory_threshold=str(plugin_config.get("advisory_threshold", 128000)),
         )
-        system_prompt.append(prompt)
+        tool_prompt = self.agent.read_prompt("agent.system.tool.swiss_cheese.md")
+        system_prompt.append(doctrine_prompt)
+        system_prompt.append(tool_prompt)

@@ -498,6 +498,42 @@ def test_apply_audit_result_normalizes_findings_and_dedupes_followups(
     assert any(miss["title"] == "Followup deduplicated" for miss in near_misses)
 
 
+def test_add_or_update_todo_merges_duplicate_titles(context_factory) -> None:
+    make_context, _persisted = context_factory
+    ctx = make_context(name="Todo Merge")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+    state_helper.ensure_state(ctx, plugin_config=plugin_config)
+
+    first = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Verify tool request schema",
+            "detail": "Ensure the next SwissCheese call uses the documented argument shape.",
+            "severity": "medium",
+            "source": "audit",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+    second = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Verify tool request schema",
+            "detail": "Ensure the next SwissCheese call uses the documented argument shape before submission.",
+            "severity": "high",
+            "source": "heuristic_fallback",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+
+    todos = ctx.get_data("todos") or []
+    assert len(todos) == 1
+    assert todos[0]["id"] == first["id"] == second["id"]
+    assert todos[0]["severity"] == "high"
+    assert "before submission" in todos[0]["detail"]
+
+
 @pytest.mark.asyncio
 async def test_swiss_cheese_tool_todo_lifecycle_and_status(
     context_factory,
@@ -534,7 +570,7 @@ async def test_swiss_cheese_tool_todo_lifecycle_and_status(
         args={},
         message="",
         loop_data=None,
-    ).execute()
+    ).execute(status="open")
     todo_list = _parse_tool_payload(response)
     assert any(todo["id"] == todo_id for todo in todo_list["data"]["todos"])
 
@@ -553,11 +589,33 @@ async def test_swiss_cheese_tool_todo_lifecycle_and_status(
     response = await SwissCheeseTool(
         agent=agent,
         name="swiss_cheese",
+        method="todo_list",
+        args={},
+        message="",
+        loop_data=None,
+    ).execute(status="completed")
+    completed_list = _parse_tool_payload(response)
+    assert any(todo["id"] == todo_id for todo in completed_list["data"]["todos"])
+
+    response = await SwissCheeseTool(
+        agent=agent,
+        name="swiss_cheese",
+        method="todo_clear_completed",
+        args={},
+        message="",
+        loop_data=None,
+    ).execute(confirm=True)
+    cleared = _parse_tool_payload(response)
+    assert cleared["data"]["remaining"] == 0
+
+    response = await SwissCheeseTool(
+        agent=agent,
+        name="swiss_cheese",
         method="status",
         args={},
         message="",
         loop_data=None,
-    ).execute()
+    ).execute(detail="full")
     status = _parse_tool_payload(response)
     assert "context_window" in status["data"]
     assert status["data"]["context_window"]["chat_model"]["current_tokens"] == 1234
