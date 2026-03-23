@@ -79,9 +79,9 @@ def _build_scope_payload(agent: "Agent", plugin_config: dict[str, Any], scope: d
     }
 
 
-def _build_chat_catalog_snapshot(agent: "Agent", plugin_config: dict[str, Any]) -> list[dict[str, Any]]:
+def _build_target_catalog_snapshot(agent: "Agent", plugin_config: dict[str, Any]) -> list[dict[str, Any]]:
     scope = agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {})
-    targets = discovery.list_chat_catalog(
+    targets = discovery.list_targets(
         source_context=agent.context,
         scope=scope,
         project_only=False,
@@ -91,11 +91,14 @@ def _build_chat_catalog_snapshot(agent: "Agent", plugin_config: dict[str, Any]) 
     for target in targets[:12]:
         snapshot.append(
             {
-                "id": target.get("id", ""),
+                "target_key": target.get("target_key", ""),
+                "kind": target.get("kind", ""),
+                "context_id": target.get("context_id", ""),
                 "name": target.get("name", ""),
                 "project_name": target.get("project_name", ""),
                 "live": bool(target.get("live", False)),
                 "persisted_only": bool(target.get("persisted_only", False)),
+                "scheduler": target.get("scheduler", None),
                 "permissions": target.get("permissions", {}),
             }
         )
@@ -127,8 +130,8 @@ def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_stat
         "open_todos": agent.context.get_data("todos") or [],
         "shared_project_backlog": project_state.list_project_todos(agent.context, status="all"),
         "project_rollup_summary": project_rollup,
-        "chat_catalog": _build_chat_catalog_snapshot(agent, plugin_config),
-        "current_project_chat_scope": scope,
+        "target_catalog": _build_target_catalog_snapshot(agent, plugin_config),
+        "current_project_target_scope": scope,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
@@ -396,9 +399,17 @@ def _maybe_queue_current_chat_nudge(
     if project_name and project_state.has_notification_fingerprint(project_name, fingerprint):
         return
 
+    current_target = discovery.inspect_target(
+        source_context=agent.context,
+        scope=agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {}),
+    ).get("target") or {}
     queued, _info = state_helper.queue_followup(
         agent.context,
-        target_context_id=agent.context.id,
+        target_key=str(current_target.get("target_key", "") or f"chat:{agent.context.id}"),
+        target_kind=str(current_target.get("kind", "chat") or "chat"),
+        target_context_id=str(current_target.get("context_id", "") or agent.context.id),
+        target_task_uuid=str(((current_target.get("scheduler") or {}) if isinstance(current_target.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+        target_name=str(current_target.get("name", "") or agent.context.name or agent.context.id),
         reason="swiss_cheese_review",
         message=_build_current_chat_nudge_message(new_high_confidence_holes, new_project_todo_ids),
         auto_send=True,
@@ -516,55 +527,39 @@ def _apply_audit_result(
         message = str(raw_followup.get("message", "")).strip()
         if not reason or not message:
             continue
-        target = str(raw_followup.get("target", "current_chat") or "current_chat")
+        target = str(raw_followup.get("target", "current_target") or "current_target")
+        target_key_raw = str(raw_followup.get("target_key", "") or "").strip()
         target_context_id_raw = str(raw_followup.get("target_context_id", "") or "").strip()
         auto_send = bool(raw_followup.get("auto_send", False))
-        target_context_id = agent.context.id
-        if target_context_id_raw:
-            inspection = discovery.inspect_chat(
-                source_context=agent.context,
-                target_context_id=target_context_id_raw,
-                scope=agent.context.get_data("cross_chat_scope") or {},
+        inspection = discovery.inspect_target(
+            source_context=agent.context,
+            selector="" if target in {"current_chat", "current_target"} else target,
+            target_key=target_key_raw,
+            target_context_id=target_context_id_raw,
+            scope=agent.context.get_data("cross_chat_scope") or {},
+        )
+        target_meta = inspection.get("target") or {}
+        if not target_meta or not inspection.get("permissions", {}).get("can_queue", False):
+            selector_label = target_key_raw or target_context_id_raw or target
+            state_helper.record_near_miss(
+                agent.context,
+                {
+                    "title": "Followup queue blocked",
+                    "detail": f"SwissCheese rejected queued followup for target '{selector_label}'.",
+                    "barrier": "Communicate",
+                    "severity": "medium",
+                    "confidence": 1.0,
+                },
+                plugin_config=plugin_config,
             )
-            target_meta = inspection.get("target") or {}
-            if not inspection.get("permissions", {}).get("can_queue", False):
-                state_helper.record_near_miss(
-                    agent.context,
-                    {
-                        "title": "Followup queue blocked",
-                        "detail": f"SwissCheese rejected queued followup for target id '{target_context_id_raw}'.",
-                        "barrier": "Communicate",
-                        "severity": "medium",
-                        "confidence": 1.0,
-                    },
-                    plugin_config=plugin_config,
-                )
-                continue
-            target_context_id = str(target_meta.get("id", agent.context.id))
-        elif target != "current_chat":
-            inspection = discovery.inspect_chat(
-                source_context=agent.context,
-                selector=target,
-                scope=agent.context.get_data("cross_chat_scope") or {},
-            )
-            target_meta = inspection.get("target") or {}
-            if not inspection.get("permissions", {}).get("can_queue", False):
-                state_helper.record_near_miss(
-                    agent.context,
-                    {
-                        "title": "Followup queue blocked",
-                        "detail": f"SwissCheese rejected queued followup for target '{target}'.",
-                        "barrier": "Communicate",
-                        "severity": "medium",
-                        "confidence": 1.0,
-                    },
-                    plugin_config=plugin_config,
-                )
-                continue
-            target_context_id = str(target_meta.get("id", agent.context.id))
+            continue
         queued, info = state_helper.queue_followup(
             agent.context,
-            target_context_id=target_context_id,
+            target_key=str(target_meta.get("target_key", "") or ""),
+            target_kind=str(target_meta.get("kind", "chat") or "chat"),
+            target_context_id=str(target_meta.get("context_id", "") or agent.context.id),
+            target_task_uuid=str(((target_meta.get("scheduler") or {}) if isinstance(target_meta.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+            target_name=str(target_meta.get("name", "") or ""),
             reason=reason,
             message=message,
             auto_send=auto_send,

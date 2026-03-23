@@ -2,7 +2,7 @@
 conversation resilience situational awareness todo hygiene bounded followups
 always send explicit non-empty tool_args for swiss_cheese tools
 never send an empty object for swiss_cheese tool_args
-when targeting another chat, prefer exact `target_context_id` values from `swiss_cheese:chat_catalog`
+when targeting another target, prefer exact `target_key` values from `swiss_cheese:target_catalog`
 use `scope: "project"` for shared project backlog actions and `scope: "chat"` for chat-local actions
 
 #### swiss_cheese:status
@@ -41,22 +41,24 @@ usage:
 }
 ~~~
 
-#### swiss_cheese:chat_catalog
-list discoverable chat targets with exact ids and permissions
-args project_only include_persisted
+#### swiss_cheese:target_catalog
+list discoverable orchestration targets with exact keys and permissions
+args project_only include_persisted kind
 - project_only: true or false
 - include_persisted: true or false
+- kind: all chat task
 usage:
 ~~~json
 {
     "thoughts": [
-        "I should list the exact chat catalog before queueing a same-project followup."
+        "I should list the exact target catalog before queueing a same-project followup."
     ],
-    "headline": "Listing chat catalog",
-    "tool_name": "swiss_cheese:chat_catalog",
+    "headline": "Listing target catalog",
+    "tool_name": "swiss_cheese:target_catalog",
     "tool_args": {
         "project_only": true,
-        "include_persisted": true
+        "include_persisted": true,
+        "kind": "all"
     }
 }
 ~~~
@@ -138,26 +140,27 @@ usage:
 }
 ~~~
 
-#### swiss_cheese:inspect_chat
-inspect a chat target within swisscheese scope
-args selector target_context_id
+#### swiss_cheese:inspect_target
+inspect a chat or task target within swisscheese scope
+args selector target_key target_context_id kind
 usage:
 ~~~json
 {
     "thoughts": [
-        "I should inspect the target chat before queuing a bounded followup."
+        "I should inspect the target before queuing a bounded followup."
     ],
-    "headline": "Inspecting target chat",
-    "tool_name": "swiss_cheese:inspect_chat",
+    "headline": "Inspecting target",
+    "tool_name": "swiss_cheese:inspect_target",
     "tool_args": {
-        "target_context_id": "ctx_beta_1234"
+        "target_key": "task:abc123",
+        "kind": "all"
     }
 }
 ~~~
 
 #### swiss_cheese:queue_followup
-queue a bounded followup for current or selected chat
-args selector target_context_id reason message auto_send
+queue a bounded followup for the current or selected target
+args selector target_key target_context_id reason message auto_send kind
 usage:
 ~~~json
 {
@@ -167,10 +170,28 @@ usage:
     "headline": "Queueing SwissCheese followup",
     "tool_name": "swiss_cheese:queue_followup",
     "tool_args": {
-        "target_context_id": "ctx_beta_1234",
+        "target_key": "task:abc123",
         "reason": "schema_check",
-        "message": "Use the canonical SwissCheese tool arguments and continue with the user task.",
+        "message": "Use the canonical SwissCheese tool arguments and continue with the user task through the target queue.",
         "auto_send": false
+    }
+}
+~~~
+
+#### swiss_cheese:bridge_followup
+bridge a queued followup into the target context queue, or send a bridged item now
+args fingerprint send_now
+usage:
+~~~json
+{
+    "thoughts": [
+        "This followup is approved and should be bridged into the target queue."
+    ],
+    "headline": "Bridging SwissCheese followup",
+    "tool_name": "swiss_cheese:bridge_followup",
+    "tool_args": {
+        "fingerprint": "abcd1234ef567890",
+        "send_now": false
     }
 }
 ~~~

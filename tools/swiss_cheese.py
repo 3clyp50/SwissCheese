@@ -15,8 +15,10 @@ class SwissCheese(Tool):
             return await self._status(**kwargs)
         if self.method == "context_window":
             return await self._context_window(**kwargs)
+        if self.method == "target_catalog":
+            return await self._target_catalog(**kwargs)
         if self.method == "chat_catalog":
-            return await self._chat_catalog(**kwargs)
+            return await self._target_catalog(**kwargs)
         if self.method == "todo_add":
             return await self._todo_add(**kwargs)
         if self.method == "todo_list":
@@ -25,10 +27,14 @@ class SwissCheese(Tool):
             return await self._todo_resolve(**kwargs)
         if self.method == "todo_clear_completed":
             return await self._todo_clear_completed(**kwargs)
+        if self.method == "inspect_target":
+            return await self._inspect_target(**kwargs)
         if self.method == "inspect_chat":
-            return await self._inspect_chat(**kwargs)
+            return await self._inspect_target(**kwargs)
         if self.method == "queue_followup":
             return await self._queue_followup(**kwargs)
+        if self.method == "bridge_followup":
+            return await self._bridge_followup(**kwargs)
         return Response(
             message=self._encode(
                 "Unknown SwissCheese method.",
@@ -115,25 +121,28 @@ class SwissCheese(Tool):
             break_loop=False,
         )
 
-    async def _chat_catalog(
+    async def _target_catalog(
         self,
         project_only: bool = False,
         include_persisted: bool = True,
+        kind: str = "all",
         **kwargs,
     ) -> Response:
         plugin_config = swiss_config.get_plugin_config(self.agent)
-        targets = discovery.list_chat_catalog(
+        targets = discovery.list_targets(
             source_context=self.agent.context,
             scope=plugin_config.get("cross_chat_scope", {}),
             project_only=bool(project_only),
             include_persisted=bool(include_persisted),
+            kind=str(kind or "all"),
         )
         return Response(
             message=self._encode(
-                "SwissCheese chat catalog listed.",
+                "SwissCheese target catalog listed.",
                 {
                     "project_only": bool(project_only),
                     "include_persisted": bool(include_persisted),
+                    "kind": str(kind or "all"),
                     "targets": targets,
                 },
             ),
@@ -269,35 +278,41 @@ class SwissCheese(Tool):
             break_loop=False,
         )
 
-    async def _inspect_chat(
+    async def _inspect_target(
         self,
         selector: str = "",
+        target_key: str = "",
         target_context_id: str = "",
         project_only: bool = False,
         include_persisted: bool = True,
+        kind: str = "all",
         **kwargs,
     ) -> Response:
         plugin_config = swiss_config.get_plugin_config(self.agent)
-        inspection = discovery.inspect_chat(
+        inspection = discovery.inspect_target(
             source_context=self.agent.context,
             selector=selector,
+            target_key=target_key,
             target_context_id=target_context_id,
             scope=plugin_config.get("cross_chat_scope", {}),
             project_only=bool(project_only),
             include_persisted=bool(include_persisted),
+            kind=str(kind or "all"),
         )
         return Response(
-            message=self._encode("SwissCheese chat inspection.", inspection),
+            message=self._encode("SwissCheese target inspection.", inspection),
             break_loop=False,
         )
 
     async def _queue_followup(
         self,
         selector: str = "",
+        target_key: str = "",
         target_context_id: str = "",
         message: str = "",
         reason: str = "",
         auto_send: bool = False,
+        kind: str = "all",
         **kwargs,
     ) -> Response:
         if not message.strip() or not reason.strip():
@@ -310,30 +325,36 @@ class SwissCheese(Tool):
             )
 
         plugin_config = swiss_config.get_plugin_config(self.agent)
-        resolved_target_context_id = self.agent.context.id
-        inspection = None
-
-        if selector.strip() or target_context_id.strip():
-            inspection = discovery.inspect_chat(
-                source_context=self.agent.context,
-                selector=selector,
-                target_context_id=target_context_id,
-                scope=plugin_config.get("cross_chat_scope", {}),
+        inspection = discovery.inspect_target(
+            source_context=self.agent.context,
+            selector=selector,
+            target_key=target_key,
+            target_context_id=target_context_id,
+            scope=plugin_config.get("cross_chat_scope", {}),
+            kind=str(kind or "all"),
+        )
+        target = inspection.get("target") or {}
+        if not target:
+            return Response(
+                message=self._encode("Followup target was not found.", {"inspection": inspection, "ok": False}),
+                break_loop=False,
             )
-            target = inspection.get("target") or {}
-            if not inspection.get("permissions", {}).get("can_queue", False):
-                return Response(
-                    message=self._encode(
-                        "Followup target is not queueable in the current scope.",
-                        {"inspection": inspection, "ok": False},
-                    ),
-                    break_loop=False,
-                )
-            resolved_target_context_id = str(target.get("id", "") or self.agent.context.id)
+        if not inspection.get("permissions", {}).get("can_queue", False):
+            return Response(
+                message=self._encode(
+                    "Followup target is not queueable in the current scope.",
+                    {"inspection": inspection, "ok": False},
+                ),
+                break_loop=False,
+            )
 
         queued, payload = state_helper.queue_followup(
             self.agent.context,
-            target_context_id=resolved_target_context_id,
+            target_key=str(target.get("target_key", "") or ""),
+            target_kind=str(target.get("kind", "chat") or "chat"),
+            target_context_id=str(target.get("context_id", "") or ""),
+            target_task_uuid=str(((target.get("scheduler") or {}) if isinstance(target.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+            target_name=str(target.get("name", "") or ""),
             reason=reason,
             message=message,
             auto_send=bool(auto_send),
@@ -344,6 +365,28 @@ class SwissCheese(Tool):
             message=self._encode(
                 "SwissCheese followup queued." if queued else "SwissCheese followup rejected.",
                 {"queued": queued, "result": payload, "inspection": inspection},
+            ),
+            break_loop=False,
+        )
+
+    async def _bridge_followup(
+        self,
+        fingerprint: str = "",
+        send_now: bool | None = None,
+        **kwargs,
+    ) -> Response:
+        plugin_config = swiss_config.get_plugin_config(self.agent)
+        result = state_helper.bridge_next_followup(
+            self.agent.context,
+            plugin_config=plugin_config,
+            manual=True,
+            fingerprint=fingerprint,
+            send_now=send_now,
+        )
+        return Response(
+            message=self._encode(
+                "SwissCheese followup delivery processed." if result else "No SwissCheese followup was ready.",
+                {"ok": bool(result), "result": result},
             ),
             break_loop=False,
         )

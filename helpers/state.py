@@ -6,8 +6,10 @@ from typing import Any
 
 from agent import AgentContext
 from helpers import message_queue as mq
+from helpers import persist_chat
 from helpers.state_monitor_integration import mark_dirty_for_context
 
+from usr.plugins.swiss_cheese.helpers import discovery
 from usr.plugins.swiss_cheese.helpers.constants import (
     AUDIT_STATUS_KEY,
     CHAT_STATE_KEY,
@@ -22,6 +24,9 @@ from usr.plugins.swiss_cheese.helpers.constants import (
     TODOS_KEY,
     TRANSIENT_AUTONOMY_ORIGIN_KEY,
 )
+
+
+FOLLOWUP_HISTORY_LIMIT = 40
 
 
 def iso_now() -> str:
@@ -54,6 +59,128 @@ def _todo_detail(value: Any) -> str:
 def _todo_id(title: str, detail: str, hole_id: str) -> str:
     digest = hashlib.sha1(f"{title}|{detail}|{hole_id}".encode("utf-8")).hexdigest()
     return digest[:12]
+
+
+def _target_key_from_fields(target_kind: str, target_key: str, target_context_id: str, target_task_uuid: str) -> str:
+    explicit = str(target_key or "").strip()
+    if explicit:
+        return explicit
+    if str(target_kind or "").strip().lower() == "task" and str(target_task_uuid or "").strip():
+        return f"task:{str(target_task_uuid or '').strip()}"
+    return f"chat:{str(target_context_id or '').strip()}" if str(target_context_id or "").strip() else ""
+
+
+def _normalize_followup_status(value: Any) -> str:
+    candidate = str(value or "pending").strip().lower()
+    return candidate if candidate in {"pending", "bridged", "sent", "blocked", "removed", "skipped"} else "pending"
+
+
+def _normalize_delivery_state(value: Any) -> str:
+    candidate = str(value or "pending").strip().lower()
+    return candidate if candidate in {"pending", "queued_in_target_queue", "sent", "blocked", "removed"} else "pending"
+
+
+def _followup_target_parts(target_key: str, target_context_id: str, target_task_uuid: str) -> tuple[str, str, str]:
+    key = str(target_key or "").strip()
+    context_id = str(target_context_id or "").strip()
+    task_uuid = str(target_task_uuid or "").strip()
+
+    if key.startswith("task:"):
+        task_uuid = task_uuid or key.split(":", 1)[1]
+        return "task", context_id, task_uuid
+    if key.startswith("chat:"):
+        context_id = context_id or key.split(":", 1)[1]
+        return "chat", context_id, task_uuid
+    if task_uuid:
+        return "task", context_id, task_uuid
+    return "chat", context_id, task_uuid
+
+
+def normalize_followup_record(item: dict[str, Any]) -> dict[str, Any]:
+    raw_target_key = str(item.get("target_key", "") or item.get("id", "") or "").strip()
+    raw_context_id = str(item.get("target_context_id", "") or item.get("context_id", "") or "").strip()
+    raw_task_uuid = str(item.get("target_task_uuid", "") or "").strip()
+    raw_kind = str(item.get("target_kind", "") or item.get("kind", "") or "").strip().lower()
+    target_key = _target_key_from_fields(raw_kind, raw_target_key, raw_context_id, raw_task_uuid)
+    target_kind, target_context_id, target_task_uuid = _followup_target_parts(
+        target_key,
+        raw_context_id,
+        raw_task_uuid,
+    )
+
+    status = _normalize_followup_status(item.get("status", "pending"))
+    delivery_state = _normalize_delivery_state(item.get("delivery_state", ""))
+    if delivery_state == "pending":
+        if status == "bridged":
+            delivery_state = "queued_in_target_queue"
+        elif status == "sent":
+            delivery_state = "sent"
+        elif status in {"blocked", "skipped"}:
+            delivery_state = "blocked"
+        elif status == "removed":
+            delivery_state = "removed"
+
+    fingerprint = str(item.get("fingerprint", "") or "").strip()
+    bridged_item_id = str(item.get("bridged_item_id", "") or "").strip()
+    if not bridged_item_id and delivery_state in {"queued_in_target_queue", "sent"} and fingerprint:
+        bridged_item_id = fingerprint
+
+    return {
+        "fingerprint": fingerprint,
+        "target_key": target_key,
+        "target_kind": target_kind,
+        "target_context_id": target_context_id,
+        "target_task_uuid": target_task_uuid,
+        "target_name": str(item.get("target_name", "") or item.get("name", "") or target_context_id or target_key),
+        "reason": str(item.get("reason", "") or "").strip(),
+        "text": str(item.get("text", item.get("message", "")) or "").strip(),
+        "auto_send": bool(item.get("auto_send", False)),
+        "source": str(item.get("source", "manual") or "manual"),
+        "status": status,
+        "delivery_state": delivery_state,
+        "bridged_item_id": bridged_item_id,
+        "created_at": str(item.get("created_at", "") or iso_now()),
+        "bridged_at": str(item.get("bridged_at", "") or ""),
+        "sent_at": str(item.get("sent_at", "") or ""),
+        "blocked_reason": str(item.get("blocked_reason", item.get("note", "")) or "").strip(),
+        "blocked_at": str(item.get("blocked_at", "") or ""),
+        "removed_at": str(item.get("removed_at", "") or ""),
+    }
+
+
+def _normalize_followup_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for item in items or []:
+        if isinstance(item, dict):
+            normalized.append(normalize_followup_record(item))
+    return normalized
+
+
+def _upsert_followup_record(records: list[dict[str, Any]], record: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
+    normalized = normalize_followup_record(record)
+    fingerprint = normalized.get("fingerprint", "")
+    merged = [
+        normalize_followup_record(item)
+        for item in records
+        if str(item.get("fingerprint", "") or "") != fingerprint
+    ]
+    merged.append(normalized)
+    return _limit(merged, limit)
+
+
+def _find_followup(records: list[dict[str, Any]], fingerprint: str) -> dict[str, Any] | None:
+    needle = str(fingerprint or "").strip()
+    if not needle:
+        return None
+    for item in records:
+        if str(item.get("fingerprint", "") or "") == needle:
+            return item
+    return None
+
+
+def _persist_context_snapshot(context: AgentContext, reason: str) -> None:
+    persist_chat.save_tmp_chat(context)
+    mark_dirty_for_context(context.id, reason=reason)
 
 
 def normalize_todo_record(todo: dict[str, Any]) -> dict[str, Any]:
@@ -180,7 +307,7 @@ def dedupe_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "followup_queue": [],
         "followup_history": [],
         "audit_trace": [],
@@ -217,6 +344,34 @@ def _state_bundle(context: AgentContext) -> dict[str, Any]:
     return {key: context.get_data(key) for key in STATE_KEYS}
 
 
+def _commit_state(
+    context: AgentContext,
+    state: dict[str, Any],
+    *,
+    plugin_config: dict[str, Any] | None = None,
+    dirty: bool,
+    persist_reason: str | None = None,
+) -> dict[str, Any]:
+    state["followup_queue"] = _normalize_followup_items(list(state.get("followup_queue", []) or []))
+    state["followup_history"] = _limit(
+        _normalize_followup_items(list(state.get("followup_history", []) or [])),
+        FOLLOWUP_HISTORY_LIMIT,
+    )
+    state["updated_at"] = iso_now()
+    context.set_data(CHAT_STATE_KEY, state)
+    context.set_data(
+        RECOVERY_BUDGET_KEY,
+        _default_recovery_budget(
+            max_cycles=int((plugin_config or {}).get("max_auto_recovery_cycles", 2) or 2),
+            used_cycles=int(state.get("recovery_cycles_used", 0) or 0),
+        ),
+    )
+    sync_output_data(context, plugin_config=plugin_config, dirty=dirty)
+    if persist_reason:
+        _persist_context_snapshot(context, persist_reason)
+    return state
+
+
 def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = None) -> dict[str, Any]:
     if not isinstance(context.get_data(CHAT_STATE_KEY), dict):
         context.set_data(CHAT_STATE_KEY, _default_state())
@@ -234,31 +389,26 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
     if not isinstance(context.get_data(CROSS_CHAT_SCOPE_KEY), dict):
         context.set_data(CROSS_CHAT_SCOPE_KEY, {})
 
-    state = context.get_data(CHAT_STATE_KEY) or _default_state()
-    state.setdefault("followup_queue", [])
-    state.setdefault("followup_history", [])
-    state.setdefault("audit_trace", [])
-    state.setdefault("notification_history", [])
-    state.setdefault("active_user_turn", 0)
-    state.setdefault("recovery_cycles_used", 0)
-    state.setdefault("last_followup_fingerprint", "")
-    state.setdefault("last_audit_at", "")
-    state.setdefault("updated_at", iso_now())
+    raw_state = context.get_data(CHAT_STATE_KEY) or _default_state()
+    state = _default_state()
+    state.update(raw_state)
+    state["followup_queue"] = [
+        item
+        for item in _normalize_followup_items(list(raw_state.get("followup_queue", []) or []))
+        if str(item.get("status", "pending")) == "pending"
+    ]
+    state["followup_history"] = _limit(
+        _normalize_followup_items(list(raw_state.get("followup_history", []) or [])),
+        FOLLOWUP_HISTORY_LIMIT,
+    )
     context.set_data(CHAT_STATE_KEY, state)
 
     if plugin_config:
-        context.set_data(
-            RECOVERY_BUDGET_KEY,
-            _default_recovery_budget(
-                max_cycles=int(plugin_config.get("max_auto_recovery_cycles", 2) or 2),
-                used_cycles=int(state.get("recovery_cycles_used", 0) or 0),
-            ),
-        )
         context.set_data(CROSS_CHAT_SCOPE_KEY, dict(plugin_config.get("cross_chat_scope", {}) or {}))
     if not isinstance(context.get_data(RECOVERY_BUDGET_KEY), dict):
         context.set_data(RECOVERY_BUDGET_KEY, _default_recovery_budget())
 
-    sync_output_data(context, plugin_config=plugin_config, dirty=False)
+    _commit_state(context, state, plugin_config=plugin_config, dirty=False)
     return _state_bundle(context)
 
 
@@ -311,17 +461,34 @@ def sync_output_data(
     near_miss_limit = int((plugin_config or {}).get("max_near_misses", 20) or 20)
 
     output_state = {
-        "version": state.get("version", 2),
+        "version": state.get("version", 3),
         "queue_count": len(state.get("followup_queue", [])),
+        "history_count": len(state.get("followup_history", [])),
         "queue_preview": _limit(
             [
                 {
                     "fingerprint": item.get("fingerprint", ""),
                     "reason": item.get("reason", ""),
-                    "target_context_id": item.get("target_context_id", ""),
+                    "target_key": item.get("target_key", ""),
+                    "target_name": item.get("target_name", ""),
+                    "delivery_state": item.get("delivery_state", "pending"),
                     "status": item.get("status", "pending"),
                 }
                 for item in state.get("followup_queue", [])
+            ],
+            5,
+        ),
+        "history_preview": _limit(
+            [
+                {
+                    "fingerprint": item.get("fingerprint", ""),
+                    "reason": item.get("reason", ""),
+                    "target_key": item.get("target_key", ""),
+                    "target_name": item.get("target_name", ""),
+                    "delivery_state": item.get("delivery_state", "pending"),
+                    "status": item.get("status", "pending"),
+                }
+                for item in state.get("followup_history", [])
             ],
             5,
         ),
@@ -350,18 +517,8 @@ def bump_user_turn(context: AgentContext, plugin_config: dict[str, Any] | None =
     state = ensure_state(context, plugin_config=plugin_config)[CHAT_STATE_KEY]
     state["active_user_turn"] = int(state.get("active_user_turn", 0) or 0) + 1
     state["recovery_cycles_used"] = 0
-    state["updated_at"] = iso_now()
-    context.set_data(CHAT_STATE_KEY, state)
     context.set_data(TRANSIENT_AUTONOMY_ORIGIN_KEY, None)
-    if plugin_config:
-        context.set_data(
-            RECOVERY_BUDGET_KEY,
-            _default_recovery_budget(
-                max_cycles=int(plugin_config.get("max_auto_recovery_cycles", 2) or 2),
-                used_cycles=0,
-            ),
-        )
-    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    _commit_state(context, state, plugin_config=plugin_config, dirty=True)
     return state
 
 
@@ -470,9 +627,7 @@ def append_audit_trace(
     limit = int((plugin_config or {}).get("max_audit_traces", 20) or 20)
     state["audit_trace"] = _limit(traces, limit)
     state["last_audit_at"] = str(entry.get("created_at", iso_now()))
-    state["updated_at"] = iso_now()
-    context.set_data(CHAT_STATE_KEY, state)
-    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    _commit_state(context, state, plugin_config=plugin_config, dirty=True)
     return entry
 
 
@@ -499,16 +654,14 @@ def record_notification_fingerprint(
     notifications = [item for item in notifications if item.get("fingerprint") != record["fingerprint"]]
     notifications.append(record)
     state["notification_history"] = _limit(notifications, NOTIFICATION_HISTORY_LIMIT)
-    state["updated_at"] = iso_now()
-    context.set_data(CHAT_STATE_KEY, state)
-    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    _commit_state(context, state, plugin_config=plugin_config, dirty=True)
     return record
 
 
-def make_followup_fingerprint(target_context_id: str, reason: str, message: str) -> str:
+def make_followup_fingerprint(target_key: str, reason: str, message: str) -> str:
     normalized = "|".join(
         [
-            str(target_context_id or "").strip(),
+            str(target_key or "").strip(),
             str(reason or "").strip().lower(),
             " ".join(str(message or "").strip().lower().split()),
         ]
@@ -519,7 +672,11 @@ def make_followup_fingerprint(target_context_id: str, reason: str, message: str)
 def queue_followup(
     context: AgentContext,
     *,
-    target_context_id: str,
+    target_context_id: str = "",
+    target_key: str = "",
+    target_kind: str = "chat",
+    target_task_uuid: str = "",
+    target_name: str = "",
     reason: str,
     message: str,
     auto_send: bool,
@@ -529,7 +686,8 @@ def queue_followup(
     bundle = ensure_state(context, plugin_config=plugin_config)
     state = bundle[CHAT_STATE_KEY]
     queue = list(state.get("followup_queue", []))
-    fingerprint = make_followup_fingerprint(target_context_id, reason, message)
+    resolved_target_key = _target_key_from_fields(target_kind, target_key, target_context_id, target_task_uuid)
+    fingerprint = make_followup_fingerprint(resolved_target_key, reason, message)
     max_queue = int((plugin_config or {}).get("max_followup_queue", 8) or 8)
     max_cycles = int((plugin_config or {}).get("max_auto_recovery_cycles", 2) or 2)
     used_cycles = int(state.get("recovery_cycles_used", 0) or 0)
@@ -543,22 +701,385 @@ def queue_followup(
     if len(queue) >= max_queue:
         return False, {"reason": "followup_queue_full", "fingerprint": fingerprint}
 
-    item = {
-        "fingerprint": fingerprint,
-        "target_context_id": target_context_id,
-        "reason": str(reason or "").strip(),
-        "text": str(message or "").strip(),
-        "auto_send": bool(auto_send),
-        "source": str(source or "manual"),
-        "status": "pending",
-        "created_at": iso_now(),
-    }
+    item = normalize_followup_record(
+        {
+            "fingerprint": fingerprint,
+            "target_key": resolved_target_key,
+            "target_kind": target_kind,
+            "target_context_id": target_context_id,
+            "target_task_uuid": target_task_uuid,
+            "target_name": target_name,
+            "reason": str(reason or "").strip(),
+            "text": str(message or "").strip(),
+            "auto_send": bool(auto_send),
+            "source": str(source or "manual"),
+            "status": "pending",
+            "delivery_state": "pending",
+            "created_at": iso_now(),
+        }
+    )
     queue.append(item)
     state["followup_queue"] = queue
-    state["updated_at"] = iso_now()
-    context.set_data(CHAT_STATE_KEY, state)
-    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    _commit_state(
+        context,
+        state,
+        plugin_config=plugin_config,
+        dirty=True,
+        persist_reason="swiss_cheese.queue_followup",
+    )
     return True, item
+
+
+def _update_pending_item(
+    state: dict[str, Any],
+    fingerprint: str,
+    updater,
+) -> dict[str, Any] | None:
+    queue = list(state.get("followup_queue", []))
+    for idx, item in enumerate(queue):
+        if str(item.get("fingerprint", "") or "") == str(fingerprint or ""):
+            updated = normalize_followup_record(updater(dict(item)))
+            queue[idx] = updated
+            state["followup_queue"] = queue
+            return updated
+    return None
+
+
+def _mark_pending_blocked(
+    source_context: AgentContext,
+    state: dict[str, Any],
+    fingerprint: str,
+    *,
+    reason: str,
+    plugin_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    blocked = _update_pending_item(
+        state,
+        fingerprint,
+        lambda item: {
+            **item,
+            "delivery_state": "blocked",
+            "blocked_reason": reason,
+            "blocked_at": iso_now(),
+        },
+    )
+    _commit_state(
+        source_context,
+        state,
+        plugin_config=plugin_config,
+        dirty=True,
+        persist_reason="swiss_cheese.followup_blocked",
+    )
+    return {
+        "fingerprint": str(fingerprint or ""),
+        "status": "blocked",
+        "delivery_state": "blocked",
+        "reason": reason,
+        "item": blocked,
+    }
+
+
+def _select_pending_followup(
+    queue: list[dict[str, Any]],
+    *,
+    fingerprint: str = "",
+    auto_send_only: bool = False,
+) -> dict[str, Any] | None:
+    needle = str(fingerprint or "").strip()
+    if needle:
+        return next(
+            (
+                item
+                for item in queue
+                if str(item.get("fingerprint", "") or "") == needle
+                and str(item.get("status", "pending")) == "pending"
+            ),
+            None,
+        )
+
+    for item in queue:
+        if str(item.get("status", "pending")) != "pending":
+            continue
+        if auto_send_only and not bool(item.get("auto_send", False)):
+            continue
+        return item
+    return None
+
+
+def _bridge_native_queue_item(target_context: AgentContext, item: dict[str, Any]) -> dict[str, Any]:
+    item_id = str(item.get("bridged_item_id", "") or item.get("fingerprint", "") or "")
+    existing = next(
+        (queued for queued in mq.get_queue(target_context) if str(queued.get("id", "") or "") == item_id),
+        None,
+    )
+    if existing is not None:
+        return existing
+    return mq.add(target_context, str(item.get("text", "")), item_id=item_id)
+
+
+def _send_native_queue_item(
+    target_context: AgentContext,
+    item_id: str,
+    *,
+    source_context: AgentContext,
+    followup: dict[str, Any],
+    manual: bool,
+) -> dict[str, Any] | None:
+    queued_item = mq.pop_item(target_context, item_id)
+    if queued_item is None:
+        return None
+    if not manual and bool(followup.get("auto_send", False)):
+        target_context.set_data(
+            TRANSIENT_AUTONOMY_ORIGIN_KEY,
+            {
+                "source_context_id": source_context.id,
+                "fingerprint": followup.get("fingerprint", ""),
+                "reason": followup.get("reason", ""),
+                "queued_at": iso_now(),
+            },
+        )
+    mq.send_message(target_context, queued_item)
+    return queued_item
+
+
+def _record_history(state: dict[str, Any], record: dict[str, Any]) -> None:
+    state["followup_history"] = _upsert_followup_record(
+        list(state.get("followup_history", [])),
+        record,
+        limit=FOLLOWUP_HISTORY_LIMIT,
+    )
+
+
+def _consume_recovery_cycle(
+    source_context: AgentContext,
+    state: dict[str, Any],
+    item: dict[str, Any],
+    *,
+    plugin_config: dict[str, Any] | None = None,
+) -> None:
+    state["last_followup_fingerprint"] = item.get("fingerprint", "")
+    state["recovery_cycles_used"] = int(state.get("recovery_cycles_used", 0) or 0) + 1
+    _commit_state(
+        source_context,
+        state,
+        plugin_config=plugin_config,
+        dirty=True,
+        persist_reason="swiss_cheese.followup_sent",
+    )
+
+
+def _bridge_pending_followup(
+    source_context: AgentContext,
+    state: dict[str, Any],
+    pending: dict[str, Any],
+    *,
+    plugin_config: dict[str, Any] | None = None,
+    manual: bool,
+    send_now: bool,
+) -> dict[str, Any]:
+    ctx_confirmation = source_context.get_data(CTX_CONFIRMATION_KEY) or {}
+    if not manual and bool(pending.get("auto_send", False)) and ctx_confirmation.get("gate_active", False):
+        record_near_miss(
+            source_context,
+            {
+                "title": "Autonomous followup held at gate",
+                "detail": "SwissCheese kept queued autonomy idle until the active chat model context length is confirmed.",
+                "barrier": "Prepare",
+                "severity": "medium",
+                "confidence": 1.0,
+                "fingerprint": str(pending.get("fingerprint", "")),
+            },
+            plugin_config=plugin_config,
+        )
+        return _mark_pending_blocked(
+            source_context,
+            state,
+            str(pending.get("fingerprint", "")),
+            reason="chat_ctx_confirmation_gate",
+            plugin_config=plugin_config,
+        )
+
+    if send_now and not manual and bool(pending.get("auto_send", False)):
+        max_cycles = int((plugin_config or {}).get("max_auto_recovery_cycles", 2) or 2)
+        used_cycles = int(state.get("recovery_cycles_used", 0) or 0)
+        if used_cycles >= max_cycles:
+            return _mark_pending_blocked(
+                source_context,
+                state,
+                str(pending.get("fingerprint", "")),
+                reason="recovery_budget_exhausted",
+                plugin_config=plugin_config,
+            )
+
+    target_context = discovery.resolve_target_context(pending)
+    if target_context is None:
+        return _mark_pending_blocked(
+            source_context,
+            state,
+            str(pending.get("fingerprint", "")),
+            reason="target_context_unavailable",
+            plugin_config=plugin_config,
+        )
+
+    native_item = _bridge_native_queue_item(target_context, pending)
+    _persist_context_snapshot(target_context, "swiss_cheese.bridge_target_queue")
+
+    queue = list(state.get("followup_queue", []))
+    state["followup_queue"] = [
+        item
+        for item in queue
+        if str(item.get("fingerprint", "") or "") != str(pending.get("fingerprint", "") or "")
+    ]
+
+    bridged_record = normalize_followup_record(
+        {
+            **pending,
+            "status": "bridged",
+            "delivery_state": "queued_in_target_queue",
+            "bridged_item_id": str(native_item.get("id", "") or pending.get("fingerprint", "")),
+            "bridged_at": iso_now(),
+            "blocked_reason": "",
+            "blocked_at": "",
+        }
+    )
+
+    if not send_now:
+        _record_history(state, bridged_record)
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_bridged",
+        )
+        return bridged_record
+
+    sent_item = _send_native_queue_item(
+        target_context,
+        str(bridged_record.get("bridged_item_id", "") or ""),
+        source_context=source_context,
+        followup=bridged_record,
+        manual=manual,
+    )
+    if sent_item is None:
+        state["followup_queue"].append(normalize_followup_record(pending))
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_send_failed",
+        )
+        return {
+            "fingerprint": str(pending.get("fingerprint", "")),
+            "status": "blocked",
+            "delivery_state": "blocked",
+            "reason": "bridged_item_missing",
+        }
+
+    _persist_context_snapshot(target_context, "swiss_cheese.send_target_queue")
+    sent_record = normalize_followup_record(
+        {
+            **bridged_record,
+            "status": "sent",
+            "delivery_state": "sent",
+            "sent_at": iso_now(),
+        }
+    )
+    _record_history(state, sent_record)
+
+    if not manual and bool(sent_record.get("auto_send", False)):
+        _consume_recovery_cycle(source_context, state, sent_record, plugin_config=plugin_config)
+    else:
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_sent_manual",
+        )
+    return sent_record
+
+
+def _send_bridged_followup(
+    source_context: AgentContext,
+    state: dict[str, Any],
+    history_item: dict[str, Any],
+    *,
+    plugin_config: dict[str, Any] | None = None,
+    manual: bool,
+) -> dict[str, Any]:
+    target_context = discovery.resolve_target_context(history_item)
+    if target_context is None:
+        blocked_record = normalize_followup_record(
+            {
+                **history_item,
+                "status": "blocked",
+                "delivery_state": "blocked",
+                "blocked_reason": "target_context_unavailable",
+                "blocked_at": iso_now(),
+            }
+        )
+        _record_history(state, blocked_record)
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_send_blocked",
+        )
+        return blocked_record
+
+    sent_item = _send_native_queue_item(
+        target_context,
+        str(history_item.get("bridged_item_id", "") or ""),
+        source_context=source_context,
+        followup=history_item,
+        manual=manual,
+    )
+    if sent_item is None:
+        blocked_record = normalize_followup_record(
+            {
+                **history_item,
+                "status": "blocked",
+                "delivery_state": "blocked",
+                "blocked_reason": "bridged_item_missing",
+                "blocked_at": iso_now(),
+            }
+        )
+        _record_history(state, blocked_record)
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_send_missing",
+        )
+        return blocked_record
+
+    _persist_context_snapshot(target_context, "swiss_cheese.send_target_queue")
+    sent_record = normalize_followup_record(
+        {
+            **history_item,
+            "status": "sent",
+            "delivery_state": "sent",
+            "sent_at": iso_now(),
+            "blocked_reason": "",
+            "blocked_at": "",
+        }
+    )
+    _record_history(state, sent_record)
+    if not manual and bool(sent_record.get("auto_send", False)):
+        _consume_recovery_cycle(source_context, state, sent_record, plugin_config=plugin_config)
+    else:
+        _commit_state(
+            source_context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.followup_sent_manual",
+        )
+    return sent_record
 
 
 def bridge_next_followup(
@@ -566,92 +1087,52 @@ def bridge_next_followup(
     plugin_config: dict[str, Any] | None = None,
     *,
     manual: bool = False,
+    fingerprint: str = "",
+    send_now: bool | None = None,
 ) -> dict[str, Any] | None:
     bundle = ensure_state(source_context, plugin_config=plugin_config)
     state = bundle[CHAT_STATE_KEY]
     queue = list(state.get("followup_queue", []))
     history = list(state.get("followup_history", []))
-    ctx_confirmation = source_context.get_data(CTX_CONFIRMATION_KEY) or {}
 
-    if not manual and ctx_confirmation.get("gate_active", False):
-        for item in queue:
-            if item.get("status") == "pending" and item.get("auto_send"):
-                item["blocked_reason"] = "chat_ctx_confirmation_gate"
-                item["blocked_at"] = iso_now()
-                state["followup_queue"] = queue
-                state["updated_at"] = iso_now()
-                source_context.set_data(CHAT_STATE_KEY, state)
-                record_near_miss(
-                    source_context,
-                    {
-                        "title": "Autonomous followup held at gate",
-                        "detail": "SwissCheese kept queued autonomy idle until the active chat model context length is confirmed.",
-                        "barrier": "Prepare",
-                        "severity": "medium",
-                        "confidence": 1.0,
-                        "fingerprint": str(item.get("fingerprint", "")),
-                    },
-                    plugin_config=plugin_config,
-                )
-                sync_output_data(source_context, plugin_config=plugin_config, dirty=True)
-                return {
-                    "fingerprint": item.get("fingerprint", ""),
-                    "status": "blocked",
-                    "reason": "chat_ctx_confirmation_gate",
-                }
-        return None
+    requested_send_now = bool(send_now) if send_now is not None else False
 
-    bridged_item: dict[str, Any] | None = None
-    remaining: list[dict[str, Any]] = []
-    for item in queue:
-        if bridged_item is not None:
-            remaining.append(item)
-            continue
-        if item.get("status") != "pending" or not item.get("auto_send"):
-            remaining.append(item)
-            continue
-        target_context = AgentContext.get(str(item.get("target_context_id", "")))
-        if target_context is None:
-            item["status"] = "skipped"
-            item["note"] = "target_not_live"
-            history.append(item)
-            continue
-        if target_context.is_running():
-            remaining.append(item)
-            continue
-
-        mq.add(target_context, str(item.get("text", "")), item_id=str(item.get("fingerprint", "")))
-        target_context.set_data(
-            TRANSIENT_AUTONOMY_ORIGIN_KEY,
-            {
-                "source_context_id": source_context.id,
-                "fingerprint": item.get("fingerprint", ""),
-                "reason": item.get("reason", ""),
-                "queued_at": iso_now(),
-            },
-        )
-        mq.send_next(target_context)
-        bridged_item = item
-        item["status"] = "sent"
-        item["sent_at"] = iso_now()
-        history.append(item)
-
-    if bridged_item is None:
-        return None
-
-    state["followup_queue"] = remaining
-    state["followup_history"] = _limit(history, 20)
-    state["last_followup_fingerprint"] = bridged_item.get("fingerprint", "")
-    state["recovery_cycles_used"] = int(state.get("recovery_cycles_used", 0) or 0) + 1
-    state["updated_at"] = iso_now()
-    context_recovery_budget = _default_recovery_budget(
-        max_cycles=int((plugin_config or {}).get("max_auto_recovery_cycles", 2) or 2),
-        used_cycles=int(state.get("recovery_cycles_used", 0) or 0),
+    pending = _select_pending_followup(
+        queue,
+        fingerprint=fingerprint,
+        auto_send_only=not manual,
     )
-    source_context.set_data(CHAT_STATE_KEY, state)
-    source_context.set_data(RECOVERY_BUDGET_KEY, context_recovery_budget)
-    sync_output_data(source_context, plugin_config=plugin_config, dirty=True)
-    return bridged_item
+    if pending is not None:
+        return _bridge_pending_followup(
+            source_context,
+            state,
+            pending,
+            plugin_config=plugin_config,
+            manual=manual,
+            send_now=(requested_send_now if manual else True),
+        )
+
+    if manual and requested_send_now:
+        history_item = _find_followup(history, fingerprint) if fingerprint else None
+        if history_item is None:
+            history_item = next(
+                (
+                    item
+                    for item in reversed(history)
+                    if str(item.get("delivery_state", "")) == "queued_in_target_queue"
+                ),
+                None,
+            )
+        if history_item is not None and str(history_item.get("delivery_state", "")) == "queued_in_target_queue":
+            return _send_bridged_followup(
+                source_context,
+                state,
+                history_item,
+                plugin_config=plugin_config,
+                manual=True,
+            )
+
+    return None
 
 
 def remove_followup(
@@ -663,11 +1144,41 @@ def remove_followup(
     state = bundle[CHAT_STATE_KEY]
     queue = list(state.get("followup_queue", []))
     remaining = [item for item in queue if item.get("fingerprint") != fingerprint]
-    changed = len(remaining) != len(queue)
-    if not changed:
+    if len(remaining) != len(queue):
+        state["followup_queue"] = remaining
+        _commit_state(
+            context,
+            state,
+            plugin_config=plugin_config,
+            dirty=True,
+            persist_reason="swiss_cheese.remove_followup",
+        )
+        return True
+
+    history_item = _find_followup(list(state.get("followup_history", [])), fingerprint)
+    if history_item is None or str(history_item.get("delivery_state", "")) != "queued_in_target_queue":
         return False
-    state["followup_queue"] = remaining
-    state["updated_at"] = iso_now()
-    context.set_data(CHAT_STATE_KEY, state)
-    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+
+    target_context = discovery.resolve_target_context(history_item)
+    if target_context is None:
+        return False
+
+    mq.remove(target_context, str(history_item.get("bridged_item_id", "") or ""))
+    _persist_context_snapshot(target_context, "swiss_cheese.remove_target_queue_item")
+    removed_record = normalize_followup_record(
+        {
+            **history_item,
+            "status": "removed",
+            "delivery_state": "removed",
+            "removed_at": iso_now(),
+        }
+    )
+    _record_history(state, removed_record)
+    _commit_state(
+        context,
+        state,
+        plugin_config=plugin_config,
+        dirty=True,
+        persist_reason="swiss_cheese.remove_followup",
+    )
     return True

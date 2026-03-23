@@ -19,10 +19,14 @@ class SwissCheese(ApiHandler):
 
         if action == "get_state":
             return self._get_state(input)
+        if action == "list_targets":
+            return self._list_targets(input)
         if action == "list_chat_targets":
-            return self._list_chat_targets(input)
+            return self._list_targets(input)
+        if action == "inspect_target":
+            return self._inspect_target(input)
         if action == "inspect_chat":
-            return self._inspect_chat(input)
+            return self._inspect_target(input)
         if action == "confirm_ctx_window":
             return self._confirm_ctx_window(input)
         if action == "todo_add":
@@ -103,6 +107,11 @@ class SwissCheese(ApiHandler):
             available_views.append("project")
             default_view = "project"
 
+        current_target = discovery.inspect_target(
+            source_context=context,
+            scope=plugin_config.get("cross_chat_scope", {}),
+        ).get("target")
+
         return {
             "ok": True,
             "context_id": context.id,
@@ -118,9 +127,11 @@ class SwissCheese(ApiHandler):
                 "utility_model": ctx_status.get("utility_model", {}),
             },
             "scope": plugin_config.get("cross_chat_scope", {}),
+            "current_target": current_target,
             "catalog_defaults": {
                 "project_only": bool(project_name),
                 "include_persisted": True,
+                "kind": "all",
             },
         }
 
@@ -134,32 +145,35 @@ class SwissCheese(ApiHandler):
             return Response(status=404, response="Context not found")
         return self._build_state_payload(context)
 
-    def _list_chat_targets(self, input: dict) -> dict | Response:
+    def _list_targets(self, input: dict) -> dict | Response:
         context = self._get_context(input)
         if context is None:
             return Response(status=404, response="Context not found")
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
-        targets = discovery.list_chat_catalog(
+        targets = discovery.list_targets(
             source_context=context,
             scope=plugin_config.get("cross_chat_scope", {}),
             project_only=bool(input.get("project_only", False)),
             include_persisted=bool(input.get("include_persisted", True)),
+            kind=str(input.get("kind", input.get("target_kind", "all")) or "all"),
         )
         return {"ok": True, "targets": targets}
 
-    def _inspect_chat(self, input: dict) -> dict | Response:
+    def _inspect_target(self, input: dict) -> dict | Response:
         context = self._get_context(input)
         if context is None:
             return Response(status=404, response="Context not found")
         agent = context.get_agent()
         plugin_config = swiss_config.get_plugin_config(agent)
-        inspection = discovery.inspect_chat(
+        inspection = discovery.inspect_target(
             source_context=context,
             selector=str(input.get("selector", "") or ""),
+            target_key=str(input.get("target_key", "") or ""),
             target_context_id=str(input.get("target_context_id", "") or ""),
             scope=plugin_config.get("cross_chat_scope", {}),
             project_only=bool(input.get("project_only", False)),
             include_persisted=bool(input.get("include_persisted", True)),
+            kind=str(input.get("kind", input.get("target_kind", "all")) or "all"),
         )
         return {"ok": True, "inspection": inspection}
 
@@ -310,25 +324,31 @@ class SwissCheese(ApiHandler):
 
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
         selector = str(input.get("selector", "") or "").strip()
+        requested_target_key = str(input.get("target_key", "") or "").strip()
         requested_target_context_id = str(input.get("target_context_id", "") or "").strip()
-        target_context_id = context.id
-        inspection = None
-
-        if selector or requested_target_context_id:
-            inspection = discovery.inspect_chat(
-                source_context=context,
-                selector=selector,
-                target_context_id=requested_target_context_id,
-                scope=plugin_config.get("cross_chat_scope", {}),
-            )
-            target = inspection.get("target") or {}
-            if not inspection.get("permissions", {}).get("can_queue", False):
-                return Response(status=403, response="Target chat is not queueable in the current scope")
-            target_context_id = str(target.get("id", "") or context.id)
+        inspection = discovery.inspect_target(
+            source_context=context,
+            selector=selector,
+            target_key=requested_target_key,
+            target_context_id=requested_target_context_id,
+            scope=plugin_config.get("cross_chat_scope", {}),
+            project_only=bool(input.get("project_only", False)),
+            include_persisted=bool(input.get("include_persisted", True)),
+            kind=str(input.get("kind", input.get("target_kind", "all")) or "all"),
+        )
+        target = inspection.get("target") or {}
+        if not target:
+            return Response(status=404, response="Target not found")
+        if not inspection.get("permissions", {}).get("can_queue", False):
+            return Response(status=403, response="Target is not queueable in the current scope")
 
         queued, payload = state_helper.queue_followup(
             context,
-            target_context_id=target_context_id,
+            target_key=str(target.get("target_key", "") or ""),
+            target_kind=str(target.get("kind", "chat") or "chat"),
+            target_context_id=str(target.get("context_id", "") or ""),
+            target_task_uuid=str(((target.get("scheduler") or {}) if isinstance(target.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+            target_name=str(target.get("name", "") or ""),
             reason=reason,
             message=message,
             auto_send=bool(input.get("auto_send", False)),
@@ -365,5 +385,11 @@ class SwissCheese(ApiHandler):
         if context is None:
             return Response(status=404, response="Context not found")
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
-        bridged = state_helper.bridge_next_followup(context, plugin_config=plugin_config, manual=True)
-        return {"ok": bool(bridged), "bridged": bridged}
+        result = state_helper.bridge_next_followup(
+            context,
+            plugin_config=plugin_config,
+            manual=True,
+            fingerprint=str(input.get("fingerprint", "") or ""),
+            send_now=(bool(input["send_now"]) if "send_now" in input else None),
+        )
+        return {"ok": bool(result), "result": result, "bridged": result}

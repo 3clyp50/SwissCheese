@@ -5,6 +5,7 @@ import json
 import shutil
 import sys
 import threading
+import types
 import uuid
 from pathlib import Path
 from typing import Any
@@ -12,14 +13,44 @@ from typing import Any
 import pytest
 from flask import Flask
 
-PROJECT_ROOT = Path(__file__).resolve().parents[4]
+TEST_FILE = Path(__file__).resolve()
+PLUGIN_ROOT = TEST_FILE.parents[1]
+PROJECT_ROOT = next(
+    (
+        candidate
+        for candidate in (
+            TEST_FILE.parents[2] / "agent-zero",
+            TEST_FILE.parents[3] / "agent-zero",
+            TEST_FILE.parents[4],
+        )
+        if (candidate / "agent.py").exists()
+    ),
+    TEST_FILE.parents[4],
+)
+try:
+    sys.path.remove(str(PLUGIN_ROOT))
+except ValueError:
+    pass
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+usr_pkg = sys.modules.setdefault("usr", types.ModuleType("usr"))
+usr_pkg.__path__ = [str(PROJECT_ROOT / "usr")]
+plugins_pkg = sys.modules.setdefault("usr.plugins", types.ModuleType("usr.plugins"))
+plugins_pkg.__path__ = [str(PROJECT_ROOT / "usr" / "plugins")]
+swiss_pkg = sys.modules.setdefault("usr.plugins.swiss_cheese", types.ModuleType("usr.plugins.swiss_cheese"))
+swiss_pkg.__path__ = [str(PLUGIN_ROOT)]
+
+helpers_module = types.ModuleType("helpers")
+helpers_module.__path__ = [str(PROJECT_ROOT / "helpers")]
+sys.modules["helpers"] = helpers_module
 
 from agent import AgentContext
 from api.load_webui_extensions import LoadWebuiExtensions
 from helpers import files
+from helpers import message_queue as mq
 from helpers import plugins as plugin_helpers
+from helpers import task_scheduler
 from helpers.api import Response
 from initialize import initialize_agent
 from usr.plugins.swiss_cheese.api.swiss_cheese import SwissCheese as SwissCheeseApi
@@ -42,6 +73,30 @@ MODEL_CONFIG_DEFAULT = {
         "ctx_length": 0,
     },
 }
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _mount_plugin_under_host() -> None:
+    host_plugin_root = Path(files.get_abs_path("usr/plugins", "swiss_cheese"))
+    created = False
+
+    if not host_plugin_root.exists():
+        host_plugin_root.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            PLUGIN_ROOT,
+            host_plugin_root,
+            ignore=shutil.ignore_patterns(".git", ".pytest_cache", "__pycache__", ".specs", "tests"),
+        )
+        created = True
+
+    plugin_helpers.clear_plugin_cache()
+
+    try:
+        yield
+    finally:
+        plugin_helpers.clear_plugin_cache()
+        if created:
+            shutil.rmtree(host_plugin_root, ignore_errors=True)
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +178,25 @@ def context_factory():
         AgentContext.remove(context_id)
     for chat_dir in persisted_paths:
         shutil.rmtree(chat_dir, ignore_errors=True)
+
+
+@pytest.fixture
+def scheduler_tasks_file():
+    path = Path(files.get_abs_path(task_scheduler.SCHEDULER_FOLDER, "tasks.json"))
+    original = path.read_text(encoding="utf-8") if path.exists() else None
+
+    def _write(tasks: list[Any]) -> Path:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = task_scheduler.SchedulerTaskList(tasks=tasks)
+        path.write_text(payload.model_dump_json(), encoding="utf-8")
+        return path
+
+    yield _write
+
+    if original is None:
+        path.unlink(missing_ok=True)
+    else:
+        path.write_text(original, encoding="utf-8")
 
 
 @pytest.fixture
@@ -429,10 +503,11 @@ async def test_no_project_chat_keeps_chat_local_todo_workflow(context_factory) -
     assert project_list_response.status_code == 400
 
 
-def test_chat_catalog_filters_exact_ids_and_persisted_permissions(
+def test_target_catalog_includes_tasks_and_persisted_task_permissions(
     context_factory,
     in_memory_plugin_backend: dict[str, Any],
     project_name_factory,
+    scheduler_tasks_file,
 ) -> None:
     make_context, persist_chat = context_factory
     project_name = project_name_factory("catalog")
@@ -449,29 +524,70 @@ def test_chat_catalog_filters_exact_ids_and_persisted_permissions(
     target = make_context(name="Beta Mission", project=project_name, profile="pilot")
     cross_project = make_context(name="Foreign Mission", project=other_project, profile="pilot")
     persist_chat(name="Gamma Mission", project=project_name)
+    persist_chat(context_id="task-persisted-ctx", name="Task Context", project=project_name)
+
+    shared_context_id = "task-shared-ctx"
+    shared_one = task_scheduler.AdHocTask.create(
+        name="Shared Task A",
+        system_prompt="sys",
+        prompt="prompt",
+        token="1111111111111111111",
+        context_id=shared_context_id,
+        project_name=project_name,
+    )
+    shared_two = task_scheduler.AdHocTask.create(
+        name="Shared Task B",
+        system_prompt="sys",
+        prompt="prompt",
+        token="2222222222222222222",
+        context_id=shared_context_id,
+        project_name=project_name,
+    )
+    persisted_task = task_scheduler.ScheduledTask.create(
+        name="Persisted Task",
+        system_prompt="sys",
+        prompt="prompt",
+        schedule=task_scheduler.TaskSchedule(minute="0", hour="1", day="*", month="*", weekday="*"),
+        context_id="task-persisted-ctx",
+        project_name=project_name,
+    )
+    scheduler_tasks_file([shared_one, shared_two, persisted_task])
 
     plugin_config = swiss_config.get_plugin_config(source.get_agent())
-    catalog = discovery.list_chat_catalog(
+    catalog = discovery.list_targets(
         source_context=source,
         scope=plugin_config.get("cross_chat_scope", {}),
         project_only=True,
         include_persisted=True,
     )
-    catalog_ids = {entry["id"] for entry in catalog}
-    assert source.id in catalog_ids
-    assert target.id in catalog_ids
-    assert cross_project.id not in catalog_ids
-    persisted_entry = next(entry for entry in catalog if entry["persisted_only"])
-    assert persisted_entry["permissions"]["can_read"] is True
-    assert persisted_entry["permissions"]["can_queue"] is False
+    catalog_keys = {entry["target_key"] for entry in catalog}
+    assert f"chat:{source.id}" in catalog_keys
+    assert f"chat:{target.id}" in catalog_keys
+    assert f"chat:{cross_project.id}" not in catalog_keys
+    assert f"task:{shared_one.uuid}" in catalog_keys
+    assert f"task:{shared_two.uuid}" in catalog_keys
 
-    inspection = discovery.inspect_chat(
+    persisted_chat_entry = next(
+        entry for entry in catalog
+        if entry["kind"] == "chat" and entry["persisted_only"]
+    )
+    assert persisted_chat_entry["permissions"]["can_read"] is True
+    assert persisted_chat_entry["permissions"]["can_queue"] is False
+
+    persisted_task_entry = next(
+        entry for entry in catalog
+        if entry["kind"] == "task" and entry["target_key"] == f"task:{persisted_task.uuid}"
+    )
+    assert persisted_task_entry["permissions"]["can_read"] is True
+    assert persisted_task_entry["permissions"]["can_queue"] is True
+
+    inspection = discovery.inspect_target(
         source_context=source,
-        target_context_id=target.id,
+        target_key=f"task:{shared_one.uuid}",
         scope=plugin_config.get("cross_chat_scope", {}),
     )
-    assert inspection["match_type"] == "exact_context_id"
-    assert inspection["target"]["id"] == target.id
+    assert inspection["match_type"] == "exact_target_key"
+    assert inspection["target"]["target_key"] == f"task:{shared_one.uuid}"
     assert inspection["permissions"]["can_queue"] is True
 
 
@@ -508,7 +624,231 @@ async def test_api_queue_followup_accepts_exact_target_context_id(
     )
     assert response["ok"] is True
     assert response["queued"] is True
+    assert response["result"]["target_key"] == f"chat:{target.id}"
     assert response["result"]["target_context_id"] == target.id
+
+
+@pytest.mark.asyncio
+async def test_api_target_actions_and_legacy_aliases_match(context_factory) -> None:
+    make_context, _persisted = context_factory
+    source = make_context(name="Source Chat")
+    target = make_context(name="Target Chat")
+    api = _new_api()
+
+    targets_new = await api.process({"action": "list_targets", "context_id": source.id}, None)
+    targets_old = await api.process({"action": "list_chat_targets", "context_id": source.id}, None)
+    assert targets_new["targets"] == targets_old["targets"]
+
+    inspect_new = await api.process(
+        {"action": "inspect_target", "context_id": source.id, "target_key": f"chat:{target.id}"},
+        None,
+    )
+    inspect_old = await api.process(
+        {"action": "inspect_chat", "context_id": source.id, "target_context_id": target.id},
+        None,
+    )
+    assert inspect_new["inspection"]["target"]["target_key"] == inspect_old["inspection"]["target"]["target_key"]
+    assert inspect_new["inspection"]["permissions"] == inspect_old["inspection"]["permissions"]
+
+
+def test_followup_fingerprint_uses_target_key_for_shared_task_contexts(context_factory) -> None:
+    make_context, _persisted = context_factory
+    source = make_context(name="Source Chat")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+
+    first_queued, first = state_helper.queue_followup(
+        source,
+        target_key="task:task-one",
+        target_kind="task",
+        target_context_id="shared-task-context",
+        target_task_uuid="task-one",
+        target_name="Task One",
+        reason="handoff",
+        message="Continue the bounded recovery sequence.",
+        auto_send=False,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    second_queued, second = state_helper.queue_followup(
+        source,
+        target_key="task:task-two",
+        target_kind="task",
+        target_context_id="shared-task-context",
+        target_task_uuid="task-two",
+        target_name="Task Two",
+        reason="handoff",
+        message="Continue the bounded recovery sequence.",
+        auto_send=False,
+        source="test",
+        plugin_config=plugin_config,
+    )
+
+    assert first_queued is True
+    assert second_queued is True
+    assert first["fingerprint"] != second["fingerprint"]
+
+
+def test_manual_bridge_of_non_auto_send_item_queues_native_message_without_spending_budget(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("bridge")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Target Chat", project=project_name, profile="pilot")
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+
+    queued, item = state_helper.queue_followup(
+        source,
+        target_key=f"chat:{target.id}",
+        target_kind="chat",
+        target_context_id=target.id,
+        target_name=target.name or target.id,
+        reason="manual_bridge",
+        message="Bridge only.",
+        auto_send=False,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert queued is True
+
+    bridged = state_helper.bridge_next_followup(
+        source,
+        plugin_config=plugin_config,
+        manual=True,
+        fingerprint=item["fingerprint"],
+        send_now=False,
+    )
+
+    assert bridged is not None
+    assert bridged["delivery_state"] == "queued_in_target_queue"
+    assert len(source.get_data(CHAT_STATE_KEY)["followup_queue"]) == 0
+    assert source.get_data(CHAT_STATE_KEY)["followup_history"][0]["delivery_state"] == "queued_in_target_queue"
+    assert len(mq.get_queue(target)) == 1
+    assert source.get_data("recovery_budget")["used_cycles"] == 0
+
+
+def test_auto_send_bridges_then_sends_and_spends_one_cycle(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("autosend")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Target Chat", project=project_name, profile="pilot")
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+    sent_messages: list[tuple[str, str]] = []
+
+    def _fake_communicate(self, msg, broadcast_level: int = 1):
+        sent_messages.append((self.id, msg.message))
+        return None
+
+    monkeypatch.setattr(AgentContext, "communicate", _fake_communicate)
+
+    queued, item = state_helper.queue_followup(
+        source,
+        target_key=f"chat:{target.id}",
+        target_kind="chat",
+        target_context_id=target.id,
+        target_name=target.name or target.id,
+        reason="auto_send",
+        message="Send immediately.",
+        auto_send=True,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert queued is True
+
+    sent = state_helper.bridge_next_followup(source, plugin_config=plugin_config, manual=False)
+
+    assert sent is not None
+    assert sent["fingerprint"] == item["fingerprint"]
+    assert sent["delivery_state"] == "sent"
+    assert sent_messages == [(target.id, "Send immediately.")]
+    assert len(mq.get_queue(target)) == 0
+    assert source.get_data("recovery_budget")["used_cycles"] == 1
+    assert source.get_data(CHAT_STATE_KEY)["followup_history"][0]["delivery_state"] == "sent"
+
+
+def test_task_target_auto_send_loads_persisted_task_context_and_sends(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+    scheduler_tasks_file,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    make_context, persist_chat = context_factory
+    project_name = project_name_factory("tasksend")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    persist_chat(context_id="task-context-id", name="Persisted Task Context", project=project_name)
+    task = task_scheduler.AdHocTask.create(
+        name="Persisted Task",
+        system_prompt="sys",
+        prompt="prompt",
+        token="3333333333333333333",
+        context_id="task-context-id",
+        project_name=project_name,
+    )
+    scheduler_tasks_file([task])
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+    sent_messages: list[tuple[str, str]] = []
+
+    def _fake_communicate(self, msg, broadcast_level: int = 1):
+        sent_messages.append((self.id, msg.message))
+        return None
+
+    monkeypatch.setattr(AgentContext, "communicate", _fake_communicate)
+
+    queued, item = state_helper.queue_followup(
+        source,
+        target_key=f"task:{task.uuid}",
+        target_kind="task",
+        target_context_id="task-context-id",
+        target_task_uuid=task.uuid,
+        target_name=task.name,
+        reason="task_followup",
+        message="Continue inside the task context queue.",
+        auto_send=True,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert queued is True
+
+    sent = state_helper.bridge_next_followup(source, plugin_config=plugin_config, manual=False)
+
+    assert sent is not None
+    assert sent["fingerprint"] == item["fingerprint"]
+    assert sent["target_key"] == f"task:{task.uuid}"
+    assert sent["delivery_state"] == "sent"
+    assert sent_messages == [("task-context-id", "Continue inside the task context queue.")]
+    assert AgentContext.get("task-context-id") is not None
 
 
 def test_build_project_rollup_counts_same_project_live_and_allowed_persisted(
@@ -617,6 +957,7 @@ def test_apply_audit_result_adds_project_backlog_and_deduped_current_chat_nudge(
 
     queue = (ctx.get_data(CHAT_STATE_KEY) or {}).get("followup_queue", [])
     assert len(queue) == 1
+    assert queue[0]["target_key"] == f"chat:{ctx.id}"
     assert queue[0]["target_context_id"] == ctx.id
     assert project_state.list_project_todos(ctx, status="all")[0]["title"] == "Align shared checklist"
     assert (ctx.get_data(CHAT_STATE_KEY) or {}).get("notification_history")
@@ -663,8 +1004,8 @@ async def test_tool_chat_catalog_and_scoped_project_todo_lifecycle(
     ).execute(project_only=True, include_persisted=True)
     catalog_payload = _parse_tool_payload(catalog_response)
     target_ids = {item["id"] for item in catalog_payload["data"]["targets"]}
-    assert source.id in target_ids
-    assert target.id in target_ids
+    assert f"chat:{source.id}" in target_ids
+    assert f"chat:{target.id}" in target_ids
 
     add_response = await SwissCheeseTool(
         agent=agent,

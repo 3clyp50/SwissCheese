@@ -49,7 +49,9 @@ SwissCheese never relies on the metaphor being intuitive. The README, system pro
 - hard-gates SwissCheese-generated autonomy until the chat model `ctx_length` has been explicitly confirmed
 - audits every assistant turn with the utility model using structured JSON
 - falls back to deterministic heuristics when the audit JSON is malformed
-- maintains holes, todos, near misses, recovery budget, and scoped cross-chat permissions in persisted chat state
+- maintains holes, todos, near misses, recovery budget, and scoped cross-target permissions in persisted chat state
+- unifies ordinary chats and scheduler task contexts into one target catalog
+- keeps SwissCheese as the approval layer while using the native `message_queue` as the delivery layer after bridge
 - keeps automatic recovery bounded, deduplicated, and idle-only
 
 ## Context Window Doctrine
@@ -63,11 +65,11 @@ SwissCheese never relies on the metaphor being intuitive. The README, system pro
 
 Default orchestration is off.
 
-- `same_project_live_write`: allow queueing bounded followups to other live chats in the same project
-- `same_project_persisted_readonly`: allow inspection of persisted same-project chats without queueing into them
-- `cross_project`: allow cross-project reads and live writes only when explicitly enabled
+- `same_project_live_write`: allow queueing bounded followups to same-project live chats and same-project task targets
+- `same_project_persisted_readonly`: allow inspection of persisted same-project chats and task targets
+- `cross_project`: allow cross-project reads and writes only when explicitly enabled
 
-Persisted-only chats are always read-only until they are reopened.
+Persisted-only non-task chats stay read-only. Persisted task targets can still be queueable when scope allows and the task context is resolvable.
 
 ## Tool Surface
 
@@ -75,10 +77,13 @@ SwissCheese exposes one multi-method tool file with:
 
 - `swiss_cheese:status`
 - `swiss_cheese:context_window`
+- `swiss_cheese:target_catalog`
 - `swiss_cheese:todo_add`
 - `swiss_cheese:todo_list`
 - `swiss_cheese:todo_resolve`
 - `swiss_cheese:todo_clear_completed`
+- `swiss_cheese:inspect_target`
+- `swiss_cheese:bridge_followup`
 - `swiss_cheese:inspect_chat`
 - `swiss_cheese:queue_followup`
 
@@ -95,4 +100,8 @@ SwissCheese exposes one multi-method tool file with:
 
 ## Queue Design
 
-SwissCheese keeps its own followup queue inside `swiss_cheese_state`. It only bridges one approved item into `helpers.message_queue` after the relevant chat is idle. This avoids the core `_50_process_queue.py` auto-drainer bypassing SwissCheese policy.
+SwissCheese keeps its own followup queue inside `swiss_cheese_state` as the approval and policy layer. Once a followup is approved, SwissCheese bridges it into the target context's native `helpers.message_queue`.
+
+- `auto_send: false`: bridge into the target queue and stop there
+- `auto_send: true`: bridge first, then send that exact native queue item
+- scheduler task targets are queue-backed contexts, not "rerun the task definition" jobs

@@ -48,8 +48,9 @@ Required JSON shape:
     {
       "reason": "why a bounded followup helps",
       "message": "one bounded followup message",
-      "target": "current_chat or exact chat name",
-      "target_context_id": "exact context id or empty string",
+      "target": "current_target or exact target name",
+      "target_key": "exact target key or empty string",
+      "target_context_id": "legacy exact context id or empty string",
       "auto_send": true
     }
   ]
@@ -64,5 +65,7 @@ Audit goals:
 Backlog and target selection rules:
 - use `scope: "project"` only for actions that should live in the shared project backlog
 - otherwise use `scope: "chat"` for current-chat actions
-- when the input provides a chat catalog entry with an exact `id`, prefer that id in `target_context_id` instead of a fuzzy name
-- never target persisted-only chats for auto-send followups
+- when the input provides a target catalog entry with an exact `target_key`, prefer that key instead of a fuzzy name
+- targets can be chats or scheduler task contexts
+- task followups route into the task context queue, not the task definition prompt
+- never target persisted-only non-task chats for auto-send followups
