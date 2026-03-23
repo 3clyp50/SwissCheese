@@ -11,6 +11,13 @@ import {
 
 const TITLE = "SwissCheese";
 const ENDPOINT = "/plugins/swiss_cheese/swiss_cheese";
+const BARRIER_META = {
+  Prepare: "Setup, prerequisites, and readiness.",
+  Aviate: "Keep the current turn stable and under control.",
+  Navigate: "Direction, decisions, and next-step clarity.",
+  Communicate: "Messages, handoffs, and queued followups.",
+  Learn: "Lessons, patterns, and prevention for next time.",
+};
 
 function targetLabel(target, { includeQueueability = false } = {}) {
   if (!target) return "Current chat";
@@ -63,6 +70,7 @@ export const store = createStore("swissCheese", {
     const holes = this.chatState?.holes || [];
     return barriers.map((barrier) => ({
       barrier,
+      description: BARRIER_META[barrier] || "",
       holes: holes.filter((hole) => hole.barrier === barrier),
     }));
   },

@@ -20,6 +20,18 @@
           </div>
         </div>
 
+        <section class="swiss-intro-card">
+          <div class="swiss-intro-title">How to read this board</div>
+          <div class="swiss-intro-copy">
+            SwissCheese groups issues into five operating lanes:
+            <strong>Prepare</strong> for setup,
+            <strong>Aviate</strong> for execution stability,
+            <strong>Navigate</strong> for direction,
+            <strong>Communicate</strong> for handoffs and followups,
+            and <strong>Learn</strong> for lessons worth keeping.
+          </div>
+        </section>
+
         <div class="swiss-cheese-loading" x-show="$store.swissCheese.loading">
           <span class="material-symbols-outlined spinning">progress_activity</span>
           <span>Refreshing SwissCheese state...</span>
@@ -111,7 +123,13 @@
                   <div class="swiss-barrier-grid">
                     <template x-for="card in $store.swissCheese.barrierCards" :key="card.barrier">
                       <div class="swiss-barrier">
-                        <div class="swiss-barrier-title" x-text="card.barrier"></div>
+                        <div class="swiss-barrier-heading">
+                          <div class="swiss-barrier-title-row">
+                            <div class="swiss-barrier-title" x-text="card.barrier"></div>
+                            <span class="swiss-badge swiss-badge-count" x-text="card.holes.length === 1 ? '1 issue' : `${card.holes.length} issues`"></span>
+                          </div>
+                          <div class="swiss-barrier-caption" x-text="card.description"></div>
+                        </div>
                         <template x-if="card.holes.length === 0">
                           <div class="swiss-empty">No open holes.</div>
                         </template>
@@ -353,6 +371,29 @@
       color: var(--color-text-secondary);
       max-width: 52rem;
     }
+    .swiss-intro-card {
+      border: 1px solid color-mix(in srgb, var(--color-primary) 28%, var(--color-border));
+      border-radius: 10px;
+      padding: 0.8rem 0.9rem;
+      background:
+        linear-gradient(
+          135deg,
+          color-mix(in srgb, var(--color-primary) 8%, var(--color-panel)) 0%,
+          var(--color-panel) 100%
+        );
+      display: grid;
+      gap: 0.35rem;
+    }
+    .swiss-intro-title {
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+    .swiss-intro-copy {
+      color: var(--color-text-secondary);
+      font-size: 0.9rem;
+      line-height: 1.5;
+      max-width: 68rem;
+    }
     .swiss-cheese-header-actions {
       display: flex;
       gap: 0.5rem;
@@ -430,9 +471,25 @@
       background: color-mix(in srgb, var(--color-panel) 88%, black 12%);
       min-height: 11rem;
     }
+    .swiss-barrier-heading {
+      display: grid;
+      gap: 0.3rem;
+      margin-bottom: 0.65rem;
+    }
+    .swiss-barrier-title-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.65rem;
+      align-items: baseline;
+    }
     .swiss-barrier-title {
       font-weight: 700;
-      margin-bottom: 0.5rem;
+      font-size: 0.95rem;
+    }
+    .swiss-barrier-caption {
+      color: var(--color-text-secondary);
+      font-size: 0.82rem;
+      line-height: 1.4;
     }
     .swiss-hole-list,
     .swiss-list,
@@ -475,6 +532,10 @@
       font-size: 0.75rem;
       text-transform: uppercase;
       opacity: 0.75;
+    }
+    .swiss-badge-count {
+      opacity: 0.9;
+      white-space: nowrap;
     }
     .swiss-hole-detail,
     .swiss-todo-origin {
