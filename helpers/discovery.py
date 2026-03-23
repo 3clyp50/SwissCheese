@@ -10,6 +10,8 @@ from agent import AgentContext, AgentContextType
 from helpers import files
 from helpers import projects as project_helper
 
+from usr.plugins.swiss_cheese.helpers import project_state
+
 
 @dataclass
 class ChatRecord:
@@ -48,11 +50,23 @@ def _excerpt_from_payload(data: dict[str, Any], output: dict[str, Any]) -> dict[
     todos = output.get("todos", data.get("todos", [])) or []
     near_misses = output.get("near_misses", data.get("near_misses", [])) or []
     audit_status = output.get("audit_status", data.get("audit_status", {})) or {}
+    swiss_state = output.get("swiss_cheese_state", data.get("swiss_cheese_state", {})) or {}
+
+    if isinstance(todos, list):
+        open_todos = sum(1 for todo in todos if str((todo or {}).get("status", "open")) != "completed")
+        completed_todos = max(len(todos) - open_todos, 0)
+    else:
+        open_todos = 0
+        completed_todos = 0
+
     return {
         "hole_count": len(holes) if isinstance(holes, list) else 0,
         "todo_count": len(todos) if isinstance(todos, list) else 0,
+        "open_todo_count": open_todos,
+        "completed_todo_count": completed_todos,
         "near_miss_count": len(near_misses) if isinstance(near_misses, list) else 0,
         "audit_state": str(audit_status.get("state", "idle")) if isinstance(audit_status, dict) else "idle",
+        "queue_count": int(swiss_state.get("queue_count", 0) or 0) if isinstance(swiss_state, dict) else 0,
     }
 
 
@@ -157,60 +171,127 @@ def _permissions(
     }
 
 
+def _serialize_target(
+    source_context: AgentContext,
+    record: ChatRecord,
+    scope: dict[str, bool],
+) -> dict[str, Any]:
+    permissions = _permissions(source_context=source_context, target=record, scope=scope)
+    return {
+        "id": record.id,
+        "name": record.name,
+        "project_name": record.project_name,
+        "project_title": record.project_title,
+        "running": record.running,
+        "live": record.live,
+        "persisted_only": record.persisted_only,
+        "source": record.source,
+        "path": record.path,
+        "state_excerpt": record.state_excerpt or {},
+        "permissions": permissions,
+    }
+
+
+def _all_records(include_persisted: bool = True) -> list[ChatRecord]:
+    live = list_live_chats()
+    if not include_persisted:
+        return live
+    return live + list_persisted_chats()
+
+
+def _sort_catalog(records: list[ChatRecord], source_context: AgentContext) -> list[ChatRecord]:
+    source_project = project_helper.get_context_project_name(source_context) or ""
+
+    def _key(record: ChatRecord) -> tuple[int, int, int, str]:
+        is_current = 0 if record.id == source_context.id else 1
+        same_project = 0 if _same_project(source_project, record.project_name) else 1
+        persisted = 1 if record.persisted_only else 0
+        return (is_current, same_project, persisted, record.name.lower())
+
+    return sorted(records, key=_key)
+
+
+def list_chat_catalog(
+    *,
+    source_context: AgentContext,
+    scope: dict[str, bool],
+    project_only: bool = False,
+    include_persisted: bool = True,
+) -> list[dict[str, Any]]:
+    records = _all_records(include_persisted=include_persisted)
+    source_project = project_helper.get_context_project_name(source_context) or ""
+    if project_only and source_project:
+        records = [record for record in records if record.id == source_context.id or record.project_name == source_project]
+    records = _sort_catalog(records, source_context)
+    return [_serialize_target(source_context, record, scope) for record in records]
+
+
 def inspect_chat(
     *,
     source_context: AgentContext,
-    selector: str,
+    selector: str = "",
+    target_context_id: str = "",
     scope: dict[str, bool],
+    project_only: bool = False,
+    include_persisted: bool = True,
 ) -> dict[str, Any]:
     selector = (selector or "").strip()
-    live = list_live_chats()
-    persisted = list_persisted_chats()
-    all_records = live + persisted
+    target_context_id = (target_context_id or "").strip()
+    records = _all_records(include_persisted=include_persisted)
+    source_project = project_helper.get_context_project_name(source_context) or ""
+    if project_only and source_project:
+        records = [record for record in records if record.id == source_context.id or record.project_name == source_project]
 
-    if not selector:
+    if not selector and not target_context_id:
+        current_record = ChatRecord(
+            id=source_context.id,
+            name=str(source_context.name or source_context.id),
+            project_name=source_project,
+            project_title=str((source_context.get_output_data("project") or {}).get("title", "")),
+            running=bool(source_context.is_running()),
+            live=True,
+            persisted_only=False,
+            source="live",
+            state_excerpt=_excerpt_from_payload(source_context.data, source_context.output_data),
+        )
         return {
             "selector": selector,
-            "match_type": "none",
-            "target": None,
-            "permissions": _permissions(
-                source_context=source_context,
-                target=ChatRecord(
-                    id=source_context.id,
-                    name=str(source_context.name or source_context.id),
-                    project_name=project_helper.get_context_project_name(source_context) or "",
-                    project_title=str((source_context.get_output_data("project") or {}).get("title", "")),
-                    running=bool(source_context.is_running()),
-                    live=True,
-                    persisted_only=False,
-                    source="live",
-                ),
-                scope=scope,
-            ),
+            "target_context_id": target_context_id,
+            "match_type": "current_chat",
+            "target": _serialize_target(source_context, current_record, scope),
+            "permissions": _permissions(source_context=source_context, target=current_record, scope=scope),
         }
 
-    exact_id = next((record for record in all_records if record.id == selector), None)
-    if exact_id:
-        target = exact_id
-        match_type = "exact_context_id"
-    else:
-        exact_name = next((record for record in all_records if record.name == selector), None)
-        if exact_name:
-            target = exact_name
-            match_type = "exact_name"
+    target: ChatRecord | None = None
+    match_type = "none"
+
+    if target_context_id:
+        target = next((record for record in records if record.id == target_context_id), None)
+        if target:
+            match_type = "exact_context_id"
+    elif selector:
+        exact_id = next((record for record in records if record.id == selector), None)
+        if exact_id:
+            target = exact_id
+            match_type = "exact_context_id"
         else:
-            exact_name_ci = next((record for record in all_records if record.name.lower() == selector.lower()), None)
-            if exact_name_ci:
-                target = exact_name_ci
-                match_type = "exact_name_ci"
+            exact_name = next((record for record in records if record.name == selector), None)
+            if exact_name:
+                target = exact_name
+                match_type = "exact_name"
             else:
-                scored = sorted(
-                    ((record, _score_name_match(selector, record.name)) for record in all_records),
-                    key=lambda item: item[1],
-                    reverse=True,
-                )
-                target = scored[0][0] if scored and scored[0][1] >= 0.55 else None
-                match_type = "fuzzy_name" if target else "none"
+                exact_name_ci = next((record for record in records if record.name.lower() == selector.lower()), None)
+                if exact_name_ci:
+                    target = exact_name_ci
+                    match_type = "exact_name_ci"
+                else:
+                    scored = sorted(
+                        ((record, _score_name_match(selector, record.name)) for record in records),
+                        key=lambda item: item[1],
+                        reverse=True,
+                    )
+                    target = scored[0][0] if scored and scored[0][1] >= 0.55 else None
+                    match_type = "fuzzy_name" if target else "none"
 
     permissions = _permissions(source_context=source_context, target=target, scope=scope) if target else {
         "same_project": False,
@@ -220,22 +301,47 @@ def inspect_chat(
 
     return {
         "selector": selector,
+        "target_context_id": target_context_id,
         "match_type": match_type,
-        "target": (
-            {
-                "id": target.id,
-                "name": target.name,
-                "project_name": target.project_name,
-                "project_title": target.project_title,
-                "running": target.running,
-                "live": target.live,
-                "persisted_only": target.persisted_only,
-                "source": target.source,
-                "path": target.path,
-                "state_excerpt": target.state_excerpt or {},
-            }
-            if target
-            else None
-        ),
+        "target": _serialize_target(source_context, target, scope) if target else None,
         "permissions": permissions,
+    }
+
+
+def build_project_rollup(
+    *,
+    source_context: AgentContext,
+    scope: dict[str, bool],
+) -> dict[str, Any] | None:
+    source_project = project_helper.get_context_project_name(source_context) or ""
+    if not source_project:
+        return None
+
+    include_persisted = bool(scope.get("same_project_persisted_readonly", False))
+    records = _all_records(include_persisted=include_persisted)
+    project_records = [record for record in records if record.project_name == source_project]
+    project_records = _sort_catalog(project_records, source_context)
+
+    serialized = [_serialize_target(source_context, record, scope) for record in project_records]
+    totals = {
+        "holes": sum(int((entry.get("state_excerpt") or {}).get("hole_count", 0) or 0) for entry in serialized),
+        "chat_todos": sum(int((entry.get("state_excerpt") or {}).get("open_todo_count", 0) or 0) for entry in serialized),
+        "near_misses": sum(int((entry.get("state_excerpt") or {}).get("near_miss_count", 0) or 0) for entry in serialized),
+        "queued_followups": sum(int((entry.get("state_excerpt") or {}).get("queue_count", 0) or 0) for entry in serialized),
+    }
+    project_backlog = project_state.load_project_state(source_project)
+    open_project_todos = [
+        todo for todo in list(project_backlog.get("todos", []) or [])
+        if str((todo or {}).get("status", "open")) != "completed"
+    ]
+    totals["project_todos"] = len(open_project_todos)
+
+    return {
+        "project_name": source_project,
+        "project_title": serialized[0]["project_title"] if serialized else source_project,
+        "chat_count": len(serialized),
+        "live_chat_count": sum(1 for entry in serialized if entry.get("live")),
+        "persisted_chat_count": sum(1 for entry in serialized if entry.get("persisted_only")),
+        "totals": totals,
+        "chat_summaries": serialized,
     }

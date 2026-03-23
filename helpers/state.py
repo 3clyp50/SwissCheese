@@ -15,6 +15,7 @@ from usr.plugins.swiss_cheese.helpers.constants import (
     CTX_CONFIRMATION_KEY,
     HOLES_KEY,
     NEAR_MISSES_KEY,
+    NOTIFICATION_HISTORY_LIMIT,
     RECOVERY_BUDGET_KEY,
     SEVERITIES,
     STATE_KEYS,
@@ -38,6 +39,10 @@ def _sanitize_severity(value: str) -> str:
     return candidate if candidate in SEVERITIES else "medium"
 
 
+def _sanitize_status(value: Any) -> str:
+    return "completed" if str(value or "open").strip().lower() == "completed" else "open"
+
+
 def _todo_title_key(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -51,7 +56,7 @@ def _todo_id(title: str, detail: str, hole_id: str) -> str:
     return digest[:12]
 
 
-def _normalize_todo(todo: dict[str, Any]) -> dict[str, Any]:
+def normalize_todo_record(todo: dict[str, Any]) -> dict[str, Any]:
     title = " ".join(str(todo.get("title", "")).strip().split())
     detail = _todo_detail(todo.get("detail", ""))
     hole_id = str(todo.get("hole_id", "") or "").strip()
@@ -61,14 +66,18 @@ def _normalize_todo(todo: dict[str, Any]) -> dict[str, Any]:
         "title": title,
         "detail": detail,
         "source": str(todo.get("source", "manual") or "manual"),
-        "status": str(todo.get("status", "open") or "open"),
+        "status": _sanitize_status(todo.get("status", "open")),
         "severity": _sanitize_severity(str(todo.get("severity", "medium"))),
         "hole_id": hole_id,
         "updated_at": str(todo.get("updated_at", iso_now()) or iso_now()),
+        "origin_context_id": str(todo.get("origin_context_id", "") or "").strip(),
+        "origin_context_name": str(todo.get("origin_context_name", "") or "").strip(),
+        "project_name": str(todo.get("project_name", "") or "").strip(),
+        "scope": str(todo.get("scope", "chat") or "chat").strip().lower() or "chat",
     }
 
 
-def _todos_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
+def todo_records_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_id = str(left.get("id", "") or "").strip()
     right_id = str(right.get("id", "") or "").strip()
     if left_id and right_id and left_id == right_id:
@@ -81,10 +90,23 @@ def _todos_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
 
     left_title = _todo_title_key(left.get("title", ""))
     right_title = _todo_title_key(right.get("title", ""))
-    return bool(left_title and right_title and left_title == right_title)
+    if not left_title or not right_title or left_title != right_title:
+        return False
+
+    left_scope = str(left.get("scope", "chat") or "chat").strip().lower()
+    right_scope = str(right.get("scope", "chat") or "chat").strip().lower()
+    if left_scope != right_scope:
+        return False
+
+    left_project = str(left.get("project_name", "") or "").strip()
+    right_project = str(right.get("project_name", "") or "").strip()
+    if left_scope == "project" or right_scope == "project":
+        return left_project == right_project
+
+    return True
 
 
-def _merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
+def merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
     current_severity = _sanitize_severity(str(current.get("severity", "medium")))
     incoming_severity = _sanitize_severity(str(incoming.get("severity", "medium")))
     current_rank = SEVERITIES.index(current_severity)
@@ -101,8 +123,8 @@ def _merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> di
     ):
         preferred_detail = incoming_detail
 
-    current_status = str(current.get("status", "open") or "open")
-    incoming_status = str(incoming.get("status", "open") or "open")
+    current_status = _sanitize_status(current.get("status", "open"))
+    incoming_status = _sanitize_status(incoming.get("status", "open"))
     merged_status = "open" if "open" in {current_status, incoming_status} else incoming_status
 
     current_source = str(current.get("source", "manual") or "manual")
@@ -134,30 +156,35 @@ def _merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> di
         "severity": incoming_severity if incoming_rank >= current_rank else current_severity,
         "hole_id": str(current.get("hole_id", "") or incoming.get("hole_id", "")).strip(),
         "updated_at": str(incoming.get("updated_at", "") or current.get("updated_at", "") or iso_now()),
+        "origin_context_id": str(current.get("origin_context_id", "") or incoming.get("origin_context_id", "") or "").strip(),
+        "origin_context_name": str(current.get("origin_context_name", "") or incoming.get("origin_context_name", "") or "").strip(),
+        "project_name": str(current.get("project_name", "") or incoming.get("project_name", "") or "").strip(),
+        "scope": str(current.get("scope", "") or incoming.get("scope", "") or "chat").strip().lower() or "chat",
     }
 
 
-def _dedupe_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def dedupe_todos(todos: list[dict[str, Any]]) -> list[dict[str, Any]]:
     deduped: list[dict[str, Any]] = []
     for todo in todos:
-        normalized = _normalize_todo(todo)
+        normalized = normalize_todo_record(todo)
         existing_index = next(
-            (idx for idx, item in enumerate(deduped) if _todos_match(item, normalized)),
+            (idx for idx, item in enumerate(deduped) if todo_records_match(item, normalized)),
             None,
         )
         if existing_index is None:
             deduped.append(normalized)
         else:
-            deduped[existing_index] = _merge_todo_records(deduped[existing_index], normalized)
+            deduped[existing_index] = merge_todo_records(deduped[existing_index], normalized)
     return deduped
 
 
 def _default_state() -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "followup_queue": [],
         "followup_history": [],
         "audit_trace": [],
+        "notification_history": [],
         "active_user_turn": 0,
         "recovery_cycles_used": 0,
         "last_followup_fingerprint": "",
@@ -199,7 +226,7 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
             context.set_data(key, [])
             continue
         if key == TODOS_KEY:
-            context.set_data(key, _dedupe_todos(value))
+            context.set_data(key, dedupe_todos(value))
     if not isinstance(context.get_data(AUDIT_STATUS_KEY), dict):
         context.set_data(AUDIT_STATUS_KEY, _default_audit_status())
     if not isinstance(context.get_data(CTX_CONFIRMATION_KEY), dict):
@@ -208,6 +235,17 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
         context.set_data(CROSS_CHAT_SCOPE_KEY, {})
 
     state = context.get_data(CHAT_STATE_KEY) or _default_state()
+    state.setdefault("followup_queue", [])
+    state.setdefault("followup_history", [])
+    state.setdefault("audit_trace", [])
+    state.setdefault("notification_history", [])
+    state.setdefault("active_user_turn", 0)
+    state.setdefault("recovery_cycles_used", 0)
+    state.setdefault("last_followup_fingerprint", "")
+    state.setdefault("last_audit_at", "")
+    state.setdefault("updated_at", iso_now())
+    context.set_data(CHAT_STATE_KEY, state)
+
     if plugin_config:
         context.set_data(
             RECOVERY_BUDGET_KEY,
@@ -239,6 +277,20 @@ def get_state_bundle(context: AgentContext) -> dict[str, Any]:
     return _state_bundle(context)
 
 
+def list_todos(
+    context: AgentContext,
+    *,
+    status: str = "all",
+    plugin_config: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    ensure_state(context, plugin_config=plugin_config)
+    todos = dedupe_todos(list(context.get_data(TODOS_KEY) or []))
+    normalized_status = str(status or "all").strip().lower()
+    if normalized_status in ("open", "completed"):
+        todos = [todo for todo in todos if todo.get("status") == normalized_status]
+    return todos
+
+
 def sync_output_data(
     context: AgentContext,
     plugin_config: dict[str, Any] | None = None,
@@ -259,7 +311,7 @@ def sync_output_data(
     near_miss_limit = int((plugin_config or {}).get("max_near_misses", 20) or 20)
 
     output_state = {
-        "version": state.get("version", 1),
+        "version": state.get("version", 2),
         "queue_count": len(state.get("followup_queue", [])),
         "queue_preview": _limit(
             [
@@ -274,6 +326,7 @@ def sync_output_data(
             5,
         ),
         "audit_trace": _limit(state.get("audit_trace", []), 5),
+        "notification_history": _limit(state.get("notification_history", []), 5),
         "active_user_turn": int(state.get("active_user_turn", 0) or 0),
         "last_followup_fingerprint": state.get("last_followup_fingerprint", ""),
         "last_audit_at": state.get("last_audit_at", ""),
@@ -282,7 +335,7 @@ def sync_output_data(
 
     context.set_output_data(CHAT_STATE_KEY, output_state)
     context.set_output_data(HOLES_KEY, _limit(holes, hole_limit))
-    context.set_output_data(TODOS_KEY, _limit(todos, todo_limit))
+    context.set_output_data(TODOS_KEY, _limit(dedupe_todos(todos), todo_limit))
     context.set_output_data(NEAR_MISSES_KEY, _limit(near_misses, near_miss_limit))
     context.set_output_data(AUDIT_STATUS_KEY, audit_status)
     context.set_output_data(RECOVERY_BUDGET_KEY, recovery_budget)
@@ -341,19 +394,19 @@ def add_or_update_todo(
     plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     todos = list(context.get_data(TODOS_KEY) or [])
-    record = _normalize_todo({**todo, "updated_at": iso_now()})
-    existing_index = next((idx for idx, item in enumerate(todos) if _todos_match(item, record)), None)
+    record = normalize_todo_record({**todo, "updated_at": iso_now(), "scope": "chat"})
+    existing_index = next((idx for idx, item in enumerate(todos) if todo_records_match(item, record)), None)
     if existing_index is None:
         todos.append(record)
     else:
-        todos[existing_index] = _merge_todo_records(_normalize_todo(todos[existing_index]), record)
+        todos[existing_index] = merge_todo_records(normalize_todo_record(todos[existing_index]), record)
         record = todos[existing_index]
     limit = int((plugin_config or {}).get("max_todos", 20) or 20)
-    todos = _dedupe_todos(todos)
+    todos = dedupe_todos(todos)
     context.set_data(TODOS_KEY, _limit(todos, limit))
     sync_output_data(context, plugin_config=plugin_config, dirty=True)
     current_todos = list(context.get_data(TODOS_KEY) or [])
-    return next((item for item in current_todos if _todos_match(item, record)), record)
+    return next((item for item in current_todos if todo_records_match(item, record)), record)
 
 
 def resolve_todo(
@@ -361,7 +414,7 @@ def resolve_todo(
     todo_id: str,
     plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    todos = _dedupe_todos(list(context.get_data(TODOS_KEY) or []))
+    todos = dedupe_todos(list(context.get_data(TODOS_KEY) or []))
     for todo in todos:
         if todo.get("id") == todo_id:
             todo["status"] = "completed"
@@ -376,7 +429,7 @@ def clear_completed_todos(
     context: AgentContext,
     plugin_config: dict[str, Any] | None = None,
 ) -> int:
-    todos = _dedupe_todos(list(context.get_data(TODOS_KEY) or []))
+    todos = dedupe_todos(list(context.get_data(TODOS_KEY) or []))
     remaining = [todo for todo in todos if todo.get("status") != "completed"]
     context.set_data(TODOS_KEY, remaining)
     sync_output_data(context, plugin_config=plugin_config, dirty=True)
@@ -421,6 +474,35 @@ def append_audit_trace(
     context.set_data(CHAT_STATE_KEY, state)
     sync_output_data(context, plugin_config=plugin_config, dirty=True)
     return entry
+
+
+def has_notification_fingerprint(context: AgentContext, fingerprint: str) -> bool:
+    state = ensure_state(context, plugin_config=None)[CHAT_STATE_KEY]
+    notifications = list(state.get("notification_history", []))
+    return any(str(item.get("fingerprint", "")) == str(fingerprint or "") for item in notifications)
+
+
+def record_notification_fingerprint(
+    context: AgentContext,
+    fingerprint: str,
+    *,
+    reason: str,
+    plugin_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    state = ensure_state(context, plugin_config=plugin_config)[CHAT_STATE_KEY]
+    notifications = list(state.get("notification_history", []))
+    record = {
+        "fingerprint": str(fingerprint or "").strip(),
+        "reason": str(reason or "").strip(),
+        "created_at": iso_now(),
+    }
+    notifications = [item for item in notifications if item.get("fingerprint") != record["fingerprint"]]
+    notifications.append(record)
+    state["notification_history"] = _limit(notifications, NOTIFICATION_HISTORY_LIMIT)
+    state["updated_at"] = iso_now()
+    context.set_data(CHAT_STATE_KEY, state)
+    sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    return record
 
 
 def make_followup_fingerprint(target_context_id: str, reason: str, message: str) -> str:

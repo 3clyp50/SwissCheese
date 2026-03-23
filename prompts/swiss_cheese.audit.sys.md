@@ -31,7 +31,8 @@ Required JSON shape:
       "detail": "optional detail",
       "severity": "low|medium|high|critical",
       "source": "audit",
-      "status": "open"
+      "status": "open",
+      "scope": "chat|project"
     }
   ],
   "near_misses": [
@@ -47,7 +48,8 @@ Required JSON shape:
     {
       "reason": "why a bounded followup helps",
       "message": "one bounded followup message",
-      "target": "current_chat or exact context id or exact chat name",
+      "target": "current_chat or exact chat name",
+      "target_context_id": "exact context id or empty string",
       "auto_send": true
     }
   ]
@@ -58,3 +60,9 @@ Audit goals:
 - treat issues as system-plus-process phenomena
 - prefer fewer high-confidence findings over speculative findings
 - only emit auto-send followups when they are bounded, deduplicable, and obviously safer than waiting
+
+Backlog and target selection rules:
+- use `scope: "project"` only for actions that should live in the shared project backlog
+- otherwise use `scope: "chat"` for current-chat actions
+- when the input provides a chat catalog entry with an exact `id`, prefer that id in `target_context_id` instead of a fuzzy name
+- never target persisted-only chats for auto-send followups

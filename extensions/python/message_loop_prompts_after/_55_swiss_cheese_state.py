@@ -2,7 +2,7 @@ from helpers.extension import Extension
 from agent import LoopData
 
 from usr.plugins.swiss_cheese.helpers import config as swiss_config
-from usr.plugins.swiss_cheese.helpers import context_window, state as state_helper
+from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
 
 
 def _format_holes(holes: list[dict]) -> str:
@@ -36,6 +36,20 @@ class SwissCheesePromptState(Extension):
         ctx_status = context_window.compute_context_window_status(self.agent, plugin_config=plugin_config)
         recovery_budget = self.agent.context.get_data("recovery_budget") or {"max_cycles": 0, "used_cycles": 0, "remaining_cycles": 0}
         scope = plugin_config.get("cross_chat_scope", {})
+        project_rollup = discovery.build_project_rollup(
+            source_context=self.agent.context,
+            scope=scope,
+        )
+        project_summary = "none"
+        if project_rollup:
+            totals = project_rollup.get("totals", {}) or {}
+            project_summary = (
+                f"{project_rollup.get('project_title', project_rollup.get('project_name', ''))} "
+                f"chats={project_rollup.get('chat_count', 0)} "
+                f"live={project_rollup.get('live_chat_count', 0)} "
+                f"project_todos={totals.get('project_todos', 0)} "
+                f"chat_todos={totals.get('chat_todos', 0)}"
+            ).strip()
 
         context_window.mirror_context_window_status(
             self.agent.context,
@@ -74,5 +88,7 @@ class SwissCheesePromptState(Extension):
             ),
             holes_text=_format_holes(self.agent.context.get_data("holes") or []),
             todos_text=_format_todos(self.agent.context.get_data("todos") or []),
+            project_summary=project_summary,
+            project_todos_text=_format_todos(project_state.list_project_todos(self.agent.context, status="open")),
         )
         loop_data.extras_persistent["swiss_cheese"] = prompt

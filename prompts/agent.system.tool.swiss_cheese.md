@@ -2,6 +2,8 @@
 conversation resilience situational awareness todo hygiene bounded followups
 always send explicit non-empty tool_args for swiss_cheese tools
 never send an empty object for swiss_cheese tool_args
+when targeting another chat, prefer exact `target_context_id` values from `swiss_cheese:chat_catalog`
+use `scope: "project"` for shared project backlog actions and `scope: "chat"` for chat-local actions
 
 #### swiss_cheese:status
 full swisscheese state snapshot for current chat
@@ -39,9 +41,29 @@ usage:
 }
 ~~~
 
+#### swiss_cheese:chat_catalog
+list discoverable chat targets with exact ids and permissions
+args project_only include_persisted
+- project_only: true or false
+- include_persisted: true or false
+usage:
+~~~json
+{
+    "thoughts": [
+        "I should list the exact chat catalog before queueing a same-project followup."
+    ],
+    "headline": "Listing chat catalog",
+    "tool_name": "swiss_cheese:chat_catalog",
+    "tool_args": {
+        "project_only": true,
+        "include_persisted": true
+    }
+}
+~~~
+
 #### swiss_cheese:todo_add
 add or update a swisscheese todo
-args title detail severity
+args title detail severity scope
 usage:
 ~~~json
 {
@@ -53,15 +75,17 @@ usage:
     "tool_args": {
         "title": "Verify tool request schema",
         "detail": "Ensure the next tool call uses the canonical SwissCheese argument shape.",
-        "severity": "high"
+        "severity": "high",
+        "scope": "chat"
     }
 }
 ~~~
 
 #### swiss_cheese:todo_list
-list swisscheese todos for current chat
-args status
+list swisscheese todos for current chat or shared project backlog
+args status scope
 - status: open completed all
+- scope: chat project
 usage:
 ~~~json
 {
@@ -71,14 +95,15 @@ usage:
     "headline": "Listing SwissCheese todos",
     "tool_name": "swiss_cheese:todo_list",
     "tool_args": {
-        "status": "open"
+        "status": "open",
+        "scope": "project"
     }
 }
 ~~~
 
 #### swiss_cheese:todo_resolve
 mark a swisscheese todo completed
-args todo_id
+args todo_id scope
 usage:
 ~~~json
 {
@@ -88,14 +113,15 @@ usage:
     "headline": "Resolving SwissCheese todo",
     "tool_name": "swiss_cheese:todo_resolve",
     "tool_args": {
-        "todo_id": "abc123def456"
+        "todo_id": "abc123def456",
+        "scope": "chat"
     }
 }
 ~~~
 
 #### swiss_cheese:todo_clear_completed
 remove completed swisscheese todos
-args confirm
+args confirm scope
 - confirm: must be true
 usage:
 ~~~json
@@ -106,14 +132,15 @@ usage:
     "headline": "Clearing completed SwissCheese todos",
     "tool_name": "swiss_cheese:todo_clear_completed",
     "tool_args": {
-        "confirm": true
+        "confirm": true,
+        "scope": "project"
     }
 }
 ~~~
 
 #### swiss_cheese:inspect_chat
 inspect a chat target within swisscheese scope
-args selector
+args selector target_context_id
 usage:
 ~~~json
 {
@@ -123,14 +150,14 @@ usage:
     "headline": "Inspecting target chat",
     "tool_name": "swiss_cheese:inspect_chat",
     "tool_args": {
-        "selector": "Beta Mission"
+        "target_context_id": "ctx_beta_1234"
     }
 }
 ~~~
 
 #### swiss_cheese:queue_followup
 queue a bounded followup for current or selected chat
-args selector reason message auto_send
+args selector target_context_id reason message auto_send
 usage:
 ~~~json
 {
@@ -140,7 +167,7 @@ usage:
     "headline": "Queueing SwissCheese followup",
     "tool_name": "swiss_cheese:queue_followup",
     "tool_args": {
-        "selector": "Beta Mission",
+        "target_context_id": "ctx_beta_1234",
         "reason": "schema_check",
         "message": "Use the canonical SwissCheese tool arguments and continue with the user task.",
         "auto_send": false

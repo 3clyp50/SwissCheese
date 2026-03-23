@@ -2,6 +2,7 @@ from __future__ import annotations
 
 PLUGIN_NAME = "swiss_cheese"
 DISPLAY_TITLE = "SwissCheese"
+PROJECT_STATE_FILENAME = "state.json"
 
 CHAT_STATE_KEY = "swiss_cheese_state"
 HOLES_KEY = "holes"
@@ -33,6 +34,7 @@ BARRIERS = ("Prepare", "Aviate", "Navigate", "Communicate", "Learn")
 SEVERITIES = ("low", "medium", "high", "critical")
 KINDS = ("active_failure", "latent_condition")
 MODEL_SLOTS = ("chat_model", "utility_model")
+NOTIFICATION_HISTORY_LIMIT = 40
 
 ACTIVE_FAILURE_PATTERNS = (
     "sycophancy",

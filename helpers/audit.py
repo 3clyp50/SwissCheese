@@ -11,7 +11,7 @@ from helpers import history as history_helper
 from helpers import tokens
 
 from usr.plugins.swiss_cheese.helpers import config as swiss_config
-from usr.plugins.swiss_cheese.helpers import context_window, discovery, state as state_helper
+from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
 from usr.plugins.swiss_cheese.helpers.constants import (
     ACTIVE_FAILURE_PATTERNS,
     AUDIT_STATUS_KEY,
@@ -75,7 +75,31 @@ def _build_scope_payload(agent: "Agent", plugin_config: dict[str, Any], scope: d
         "orchestration_enabled": any(scope.values()),
         "open_holes": agent.context.get_data("holes") or [],
         "open_todos": agent.context.get_data("todos") or [],
+        "project_backlog_count": len(project_state.list_project_todos(agent.context, status="open")) if project_name else 0,
     }
+
+
+def _build_chat_catalog_snapshot(agent: "Agent", plugin_config: dict[str, Any]) -> list[dict[str, Any]]:
+    scope = agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {})
+    targets = discovery.list_chat_catalog(
+        source_context=agent.context,
+        scope=scope,
+        project_only=False,
+        include_persisted=True,
+    )
+    snapshot: list[dict[str, Any]] = []
+    for target in targets[:12]:
+        snapshot.append(
+            {
+                "id": target.get("id", ""),
+                "name": target.get("name", ""),
+                "project_name": target.get("project_name", ""),
+                "live": bool(target.get("live", False)),
+                "persisted_only": bool(target.get("persisted_only", False)),
+                "permissions": target.get("permissions", {}),
+            }
+        )
+    return snapshot
 
 
 def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_status: dict[str, Any]) -> str:
@@ -83,6 +107,10 @@ def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_stat
     reasoning = str(agent.get_data(TRANSIENT_REASONING_KEY) or "")
     response = str(agent.get_data(TRANSIENT_RESPONSE_KEY) or "")
     scope = ctx_status.get("scope", {})
+    project_rollup = discovery.build_project_rollup(
+        source_context=agent.context,
+        scope=agent.context.get_data("cross_chat_scope") or plugin_config.get("cross_chat_scope", {}),
+    )
     payload = {
         "recent_conversation_history": recent_history,
         "current_context_window_snapshot": {
@@ -97,6 +125,9 @@ def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_stat
         },
         "open_holes": agent.context.get_data("holes") or [],
         "open_todos": agent.context.get_data("todos") or [],
+        "shared_project_backlog": project_state.list_project_todos(agent.context, status="all"),
+        "project_rollup_summary": project_rollup,
+        "chat_catalog": _build_chat_catalog_snapshot(agent, plugin_config),
         "current_project_chat_scope": scope,
     }
     return json.dumps(payload, ensure_ascii=False, indent=2)
@@ -165,6 +196,8 @@ def _normalize_todo(raw: dict[str, Any], hole: dict[str, Any] | None = None) -> 
     detail = str(raw.get("detail", "")).strip()
     hole_id = str(raw.get("hole_id", "")).strip() or (hole.get("id", "") if hole else "")
     digest = hashlib.sha1(f"{title}|{detail}|{hole_id}".encode("utf-8")).hexdigest()
+    scope = str(raw.get("scope", "chat") or "chat").strip().lower()
+    scope = scope if scope in {"chat", "project"} else "chat"
     return {
         "id": digest[:12],
         "title": title,
@@ -173,6 +206,7 @@ def _normalize_todo(raw: dict[str, Any], hole: dict[str, Any] | None = None) -> 
         "source": str(raw.get("source", "audit") or "audit"),
         "status": str(raw.get("status", "open") or "open"),
         "hole_id": hole_id,
+        "scope": scope,
     }
 
 
@@ -310,6 +344,84 @@ def _parse_or_fallback(agent: "Agent", response: str, ctx_status: dict[str, Any]
     return _heuristic_result(agent, ctx_status), True
 
 
+def _make_current_chat_nudge_fingerprint(
+    context_id: str,
+    hole_ids: list[str],
+    project_todo_ids: list[str],
+) -> str:
+    payload = json.dumps(
+        {
+            "context_id": context_id,
+            "hole_ids": sorted(set(hole_ids)),
+            "project_todo_ids": sorted(set(project_todo_ids)),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha1(payload.encode("utf-8")).hexdigest()[:16]
+
+
+def _build_current_chat_nudge_message(
+    new_high_confidence_holes: list[dict[str, Any]],
+    new_project_todo_ids: list[str],
+) -> str:
+    lines = ["Review the latest SwissCheese findings for this chat before continuing."]
+    if new_high_confidence_holes:
+        titles = ", ".join(hole.get("title", hole.get("pattern", "finding")) for hole in new_high_confidence_holes[:3])
+        lines.append(f"New high-confidence findings: {titles}.")
+    if new_project_todo_ids:
+        lines.append("The shared project backlog now has new SwissCheese actions.")
+    lines.append("Check SwissCheese status, address the highest-priority open todo, and continue only after an explicit verification step.")
+    return " ".join(lines)
+
+
+def _maybe_queue_current_chat_nudge(
+    agent: "Agent",
+    *,
+    plugin_config: dict[str, Any],
+    new_high_confidence_holes: list[dict[str, Any]],
+    new_project_todo_ids: list[str],
+) -> None:
+    if not new_high_confidence_holes and not new_project_todo_ids:
+        return
+
+    project_name = project_state.get_project_name(agent.context)
+    fingerprint = _make_current_chat_nudge_fingerprint(
+        agent.context.id,
+        [str(hole.get("id", "")) for hole in new_high_confidence_holes],
+        new_project_todo_ids,
+    )
+    if state_helper.has_notification_fingerprint(agent.context, fingerprint):
+        return
+    if project_name and project_state.has_notification_fingerprint(project_name, fingerprint):
+        return
+
+    queued, _info = state_helper.queue_followup(
+        agent.context,
+        target_context_id=agent.context.id,
+        reason="swiss_cheese_review",
+        message=_build_current_chat_nudge_message(new_high_confidence_holes, new_project_todo_ids),
+        auto_send=True,
+        source="audit",
+        plugin_config=plugin_config,
+    )
+    if not queued:
+        return
+
+    state_helper.record_notification_fingerprint(
+        agent.context,
+        fingerprint,
+        reason="current_chat_nudge",
+        plugin_config=plugin_config,
+    )
+    if project_name:
+        project_state.record_notification_fingerprint(
+            project_name,
+            fingerprint,
+            reason="current_chat_nudge",
+        )
+
+
 def _apply_audit_result(
     agent: "Agent",
     payload: dict[str, Any],
@@ -318,6 +430,15 @@ def _apply_audit_result(
     used_fallback: bool,
     plugin_config: dict[str, Any],
 ) -> None:
+    existing_hole_ids = {
+        str(item.get("id", ""))
+        for item in list(agent.context.get_data("holes") or [])
+        if isinstance(item, dict)
+    }
+    existing_project_todo_ids = {
+        str(item.get("id", ""))
+        for item in project_state.list_project_todos(agent.context, status="all")
+    }
     normalized_holes = [_normalize_hole(item) for item in payload.get("holes", []) if isinstance(item, dict)]
     state_helper.set_holes(agent.context, normalized_holes, plugin_config=plugin_config)
 
@@ -329,13 +450,24 @@ def _apply_audit_result(
                 plugin_config=plugin_config,
             )
 
+    new_project_todo_ids: list[str] = []
     for raw_todo in payload.get("todos", []):
         if isinstance(raw_todo, dict):
-            state_helper.add_or_update_todo(
-                agent.context,
-                _normalize_todo(raw_todo),
-                plugin_config=plugin_config,
-            )
+            normalized_todo = _normalize_todo(raw_todo)
+            if normalized_todo.get("scope") == "project" and project_state.get_project_name(agent.context):
+                project_todo = project_state.add_or_update_project_todo(
+                    agent.context,
+                    normalized_todo,
+                    plugin_config=plugin_config,
+                )
+                if project_todo and project_todo.get("id") not in existing_project_todo_ids:
+                    new_project_todo_ids.append(str(project_todo.get("id", "")))
+            else:
+                state_helper.add_or_update_todo(
+                    agent.context,
+                    normalized_todo,
+                    plugin_config=plugin_config,
+                )
 
     for raw_near_miss in payload.get("near_misses", []):
         if isinstance(raw_near_miss, dict):
@@ -365,6 +497,18 @@ def _apply_audit_result(
         plugin_config=plugin_config,
     )
 
+    new_high_confidence_holes = [
+        hole
+        for hole in normalized_holes
+        if str(hole.get("id", "")) not in existing_hole_ids and float(hole.get("confidence", 0.0) or 0.0) >= 0.85
+    ]
+    _maybe_queue_current_chat_nudge(
+        agent,
+        plugin_config=plugin_config,
+        new_high_confidence_holes=new_high_confidence_holes,
+        new_project_todo_ids=new_project_todo_ids,
+    )
+
     for raw_followup in payload.get("followups", []):
         if not isinstance(raw_followup, dict):
             continue
@@ -373,9 +517,31 @@ def _apply_audit_result(
         if not reason or not message:
             continue
         target = str(raw_followup.get("target", "current_chat") or "current_chat")
+        target_context_id_raw = str(raw_followup.get("target_context_id", "") or "").strip()
         auto_send = bool(raw_followup.get("auto_send", False))
         target_context_id = agent.context.id
-        if target != "current_chat":
+        if target_context_id_raw:
+            inspection = discovery.inspect_chat(
+                source_context=agent.context,
+                target_context_id=target_context_id_raw,
+                scope=agent.context.get_data("cross_chat_scope") or {},
+            )
+            target_meta = inspection.get("target") or {}
+            if not inspection.get("permissions", {}).get("can_queue", False):
+                state_helper.record_near_miss(
+                    agent.context,
+                    {
+                        "title": "Followup queue blocked",
+                        "detail": f"SwissCheese rejected queued followup for target id '{target_context_id_raw}'.",
+                        "barrier": "Communicate",
+                        "severity": "medium",
+                        "confidence": 1.0,
+                    },
+                    plugin_config=plugin_config,
+                )
+                continue
+            target_context_id = str(target_meta.get("id", agent.context.id))
+        elif target != "current_chat":
             inspection = discovery.inspect_chat(
                 source_context=agent.context,
                 selector=target,

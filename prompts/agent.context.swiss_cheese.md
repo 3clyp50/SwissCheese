@@ -4,7 +4,10 @@
 - Utility ctx: {{utility_ctx_summary}}
 - Cross-chat scope: {{scope_summary}}
 - Recovery budget: {{recovery_summary}}
+- Project rollup: {{project_summary}}
 - Open holes:
 {{holes_text}}
 - Open todos:
 {{todos_text}}
+- Shared project backlog:
+{{project_todos_text}}

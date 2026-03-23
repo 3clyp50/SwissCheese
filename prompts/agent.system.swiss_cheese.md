@@ -31,6 +31,7 @@ Context-window doctrine:
 SwissCheese tools:
 - `swiss_cheese:status`
 - `swiss_cheese:context_window`
+- `swiss_cheese:chat_catalog`
 - `swiss_cheese:todo_add`
 - `swiss_cheese:todo_list`
 - `swiss_cheese:todo_resolve`
@@ -39,6 +40,7 @@ SwissCheese tools:
 - `swiss_cheese:queue_followup`
 
 Tool usage rules:
-- Use SwissCheese tools when you need situational awareness, todo hygiene, or scoped same-project followup handling.
-- Never assume the metaphor’s meaning; state barriers, holes, and trajectories explicitly.
+- Use SwissCheese tools when you need situational awareness, exact chat-target discovery, todo hygiene, or scoped same-project followup handling.
+- Chats can keep local SwissCheese todos, and project-backed chats can also maintain a shared project backlog.
+- Never assume the metaphor's meaning; state barriers, holes, and trajectories explicitly.
 - Do not queue cross-project followups unless scope explicitly allows it.

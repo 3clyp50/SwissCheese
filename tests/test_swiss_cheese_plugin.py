@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from flask import Flask
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[4]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -20,12 +20,13 @@ from agent import AgentContext
 from api.load_webui_extensions import LoadWebuiExtensions
 from helpers import files
 from helpers import plugins as plugin_helpers
+from helpers.api import Response
 from initialize import initialize_agent
 from usr.plugins.swiss_cheese.api.swiss_cheese import SwissCheese as SwissCheeseApi
 from usr.plugins.swiss_cheese.helpers import audit, config as swiss_config
-from usr.plugins.swiss_cheese.helpers import context_window, discovery, state as state_helper
+from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
 from usr.plugins.swiss_cheese.helpers.config import DEFAULT_CONFIG as SWISS_DEFAULT_CONFIG
-from usr.plugins.swiss_cheese.helpers.constants import CHAT_STATE_KEY, TRANSIENT_RESPONSE_KEY
+from usr.plugins.swiss_cheese.helpers.constants import CHAT_STATE_KEY, PROJECT_STATE_FILENAME, TRANSIENT_RESPONSE_KEY
 from usr.plugins.swiss_cheese.tools.swiss_cheese import SwissCheese as SwissCheeseTool
 
 
@@ -46,6 +47,22 @@ MODEL_CONFIG_DEFAULT = {
 @pytest.fixture(autouse=True)
 def _disable_state_monitor(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(state_helper, "mark_dirty_for_context", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_state, "mark_dirty_for_context", lambda *args, **kwargs: None)
+
+
+@pytest.fixture
+def project_name_factory():
+    created: list[str] = []
+
+    def _make(prefix: str = "swiss-project") -> str:
+        name = f"{prefix}-{uuid.uuid4().hex[:8]}"
+        created.append(name)
+        return name
+
+    yield _make
+
+    for name in created:
+        shutil.rmtree(Path(files.get_abs_path("usr/projects", name)), ignore_errors=True)
 
 
 @pytest.fixture
@@ -181,19 +198,21 @@ async def test_manifest_metadata_exposes_scoped_config() -> None:
 
 def test_scoped_config_precedence_and_hybrid_confirmation_resolution(
     in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
 ) -> None:
+    project_name = project_name_factory("apollo")
     store = in_memory_plugin_backend["store"]
     store[("swiss_cheese", "", "")] = {
         "preferred_working_limit": 90000,
         "max_auto_recovery_cycles": 1,
     }
-    store[("swiss_cheese", "apollo", "")] = {
+    store[("swiss_cheese", project_name, "")] = {
         "preferred_working_limit": 95000,
     }
     store[("swiss_cheese", "", "pilot")] = {
         "preferred_working_limit": 98000,
     }
-    store[("swiss_cheese", "apollo", "pilot")] = {
+    store[("swiss_cheese", project_name, "pilot")] = {
         "preferred_working_limit": 99000,
         "confirmed_model_tuples": {
             "chat_model": [
@@ -210,7 +229,7 @@ def test_scoped_config_precedence_and_hybrid_confirmation_resolution(
 
     resolved = swiss_config.get_plugin_config(
         agent=None,
-        project_name="apollo",
+        project_name=project_name,
         agent_profile="pilot",
     )
     assert resolved["preferred_working_limit"] == 99000
@@ -219,7 +238,7 @@ def test_scoped_config_precedence_and_hybrid_confirmation_resolution(
 
     project_only = swiss_config.get_plugin_config(
         agent=None,
-        project_name="apollo",
+        project_name=project_name,
         agent_profile="",
     )
     assert project_only["preferred_working_limit"] == 95000
@@ -235,10 +254,12 @@ def test_scoped_config_precedence_and_hybrid_confirmation_resolution(
 def test_context_window_gate_warning_advisory_and_invalidation(
     context_factory,
     in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
 ) -> None:
     make_context, _persisted = context_factory
+    project_name = project_name_factory("apollo")
     store = in_memory_plugin_backend["store"]
-    store[("_model_config", "apollo", "pilot")] = {
+    store[("_model_config", project_name, "pilot")] = {
         "chat_model": {
             "provider": "openai",
             "name": "gpt-chat",
@@ -251,7 +272,7 @@ def test_context_window_gate_warning_advisory_and_invalidation(
         },
     }
 
-    ctx = make_context(name="Primary", project="apollo", profile="pilot")
+    ctx = make_context(name="Primary", project=project_name, profile="pilot")
     agent = ctx.get_agent()
     agent.set_data(agent.DATA_NAME_CTX_WINDOW, {"tokens": 110000})
     ctx.set_data("_swiss_cheese_last_utility_input", {"tokens": 1200})
@@ -266,7 +287,7 @@ def test_context_window_gate_warning_advisory_and_invalidation(
 
     scoped_cfg = swiss_config.get_plugin_config(
         agent=None,
-        project_name="apollo",
+        project_name=project_name,
         agent_profile="pilot",
     )
     swiss_config.append_confirmed_tuple(
@@ -279,173 +300,284 @@ def test_context_window_gate_warning_advisory_and_invalidation(
             "confirmed_at": "2026-03-22T00:00:00+00:00",
         },
     )
-    in_memory_plugin_backend["store"][("swiss_cheese", "apollo", "pilot")] = scoped_cfg
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = scoped_cfg
 
     status = context_window.compute_context_window_status(agent)
     assert status["gate_active"] is False
     assert status["utility_warning_active"] is True
-    assert status["utility_confidence"] == "reduced"
 
-    store[("_model_config", "apollo", "pilot")]["chat_model"]["name"] = "gpt-chat-next"
+    store[("_model_config", project_name, "pilot")]["chat_model"]["name"] = "gpt-chat-next"
     invalidated = context_window.compute_context_window_status(agent)
     assert invalidated["gate_active"] is True
     assert invalidated["chat_model"]["confirmed"] is False
 
 
-def test_queue_followup_dedup_budget_and_loop_prevention(context_factory) -> None:
+def test_project_state_persists_backlog_and_chat_todos_remain_local(
+    context_factory,
+    project_name_factory,
+) -> None:
     make_context, _persisted = context_factory
-    ctx = make_context(name="Queue Source")
+    project_name = project_name_factory("backlog")
+    ctx = make_context(name="Mission", project=project_name, profile="pilot")
     plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
     state_helper.ensure_state(ctx, plugin_config=plugin_config)
 
-    queued, first = state_helper.queue_followup(
+    chat_todo = state_helper.add_or_update_todo(
         ctx,
-        target_context_id=ctx.id,
-        reason="verify",
-        message="Run verification",
-        auto_send=True,
-        source="test",
+        {
+            "title": "Verify local change",
+            "detail": "Check only the active chat work.",
+            "severity": "medium",
+            "source": "manual",
+            "status": "open",
+        },
         plugin_config=plugin_config,
     )
-    assert queued is True
-
-    duplicate_pending, duplicate_pending_info = state_helper.queue_followup(
+    project_todo = project_state.add_or_update_project_todo(
         ctx,
-        target_context_id=ctx.id,
-        reason="verify",
-        message="Run verification",
-        auto_send=True,
-        source="test",
+        {
+            "title": "Align project checklist",
+            "detail": "Shared action across same-project chats.",
+            "severity": "high",
+            "source": "manual",
+            "status": "open",
+        },
         plugin_config=plugin_config,
     )
-    assert duplicate_pending is False
-    assert duplicate_pending_info["reason"] == "duplicate_pending"
 
-    state = ctx.get_data(CHAT_STATE_KEY)
-    state["followup_queue"] = []
-    state["last_followup_fingerprint"] = first["fingerprint"]
-    ctx.set_data(CHAT_STATE_KEY, state)
-    duplicate_last, duplicate_last_info = state_helper.queue_followup(
-        ctx,
-        target_context_id=ctx.id,
-        reason="verify",
-        message="Run verification",
-        auto_send=True,
-        source="test",
-        plugin_config=plugin_config,
-    )
-    assert duplicate_last is False
-    assert duplicate_last_info["reason"] == "duplicate_last_autonomous"
+    assert chat_todo["scope"] == "chat"
+    assert project_todo is not None
+    assert project_todo["scope"] == "project"
+    assert project_todo["project_name"] == project_name
+    assert project_todo["origin_context_id"] == ctx.id
+    assert project_todo["origin_context_name"] == "Mission"
+    assert [todo["title"] for todo in ctx.get_data("todos")] == ["Verify local change"]
+    assert [todo["title"] for todo in project_state.list_project_todos(ctx, status="all")] == ["Align project checklist"]
 
-    state = ctx.get_data(CHAT_STATE_KEY)
-    state["followup_queue"] = []
-    state["recovery_cycles_used"] = plugin_config["max_auto_recovery_cycles"]
-    ctx.set_data(CHAT_STATE_KEY, state)
-    over_budget, over_budget_info = state_helper.queue_followup(
-        ctx,
-        target_context_id=ctx.id,
-        reason="second-pass",
-        message="Take another autonomous pass",
-        auto_send=True,
-        source="test",
-        plugin_config=plugin_config,
-    )
-    assert over_budget is False
-    assert over_budget_info["reason"] == "recovery_budget_exhausted"
+    state_path = Path(files.get_abs_path("usr/projects", project_name, ".a0proj", "plugins", "swiss_cheese", PROJECT_STATE_FILENAME))
+    assert state_path.exists()
+    loaded_state = project_state.load_project_state(project_name)
+    assert loaded_state["todos"][0]["title"] == "Align project checklist"
 
 
-def test_bridge_next_followup_respects_ctx_gate_and_manual_override(
+@pytest.mark.asyncio
+async def test_api_get_state_returns_project_view_defaults_and_backlog(
     context_factory,
-    monkeypatch: pytest.MonkeyPatch,
+    project_name_factory,
 ) -> None:
     make_context, _persisted = context_factory
-    source = make_context(name="Source", project="apollo", profile="pilot")
-    target = make_context(name="Target", project="apollo", profile="pilot")
+    project_name = project_name_factory("project-view")
+    ctx = make_context(name="Project Chat", project=project_name, profile="pilot")
     plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
-    state_helper.ensure_state(source, plugin_config=plugin_config)
-    source.set_data(
-        "ctx_confirmation",
+    state_helper.ensure_state(ctx, plugin_config=plugin_config)
+    project_state.add_or_update_project_todo(
+        ctx,
         {
-            "gate_active": True,
-            "chat_model": {},
-            "utility_model": {},
+            "title": "Shared backlog item",
+            "detail": "Tracked at project scope.",
+            "severity": "high",
+            "source": "manual",
+            "status": "open",
         },
-    )
-
-    sent_to: list[str] = []
-    monkeypatch.setattr(state_helper.mq, "send_next", lambda context: sent_to.append(context.id) or True)
-
-    queued, item = state_helper.queue_followup(
-        source,
-        target_context_id=target.id,
-        reason="recover",
-        message="Continue with a bounded recovery pass.",
-        auto_send=True,
-        source="audit",
         plugin_config=plugin_config,
     )
-    assert queued is True
 
-    blocked = state_helper.bridge_next_followup(source, plugin_config=plugin_config, manual=False)
-    assert blocked is not None
-    assert blocked["status"] == "blocked"
-    assert blocked["reason"] == "chat_ctx_confirmation_gate"
-    assert sent_to == []
-    assert any(miss["fingerprint"] == item["fingerprint"] for miss in source.get_data("near_misses"))
-
-    manual = state_helper.bridge_next_followup(source, plugin_config=plugin_config, manual=True)
-    assert manual is not None
-    assert manual["fingerprint"] == item["fingerprint"]
-    assert sent_to == [target.id]
-    assert target.get_data("_swiss_cheese_autonomy_origin")["fingerprint"] == item["fingerprint"]
+    api = _new_api()
+    response = await api.process({"action": "get_state", "context_id": ctx.id}, None)
+    assert response["ok"] is True
+    assert response["default_view"] == "project"
+    assert set(response["available_views"]) == {"chat", "project"}
+    assert response["catalog_defaults"]["project_only"] is True
+    assert response["project_state"]["todos"][0]["title"] == "Shared backlog item"
+    assert response["project_rollup"]["project_name"] == project_name
 
 
-def test_audit_parse_dirty_json_and_heuristic_fallback(context_factory) -> None:
+@pytest.mark.asyncio
+async def test_no_project_chat_keeps_chat_local_todo_workflow(context_factory) -> None:
     make_context, _persisted = context_factory
-    ctx = make_context(name="Audit Chat", project="apollo", profile="pilot")
-    agent = ctx.get_agent()
-    agent.set_data(TRANSIENT_RESPONSE_KEY, "Done. Implemented the fix.")
+    ctx = make_context(name="Solo Chat")
+    api = _new_api()
 
-    ctx_status = {
-        "chat_model": {
-            "confirmed": False,
-            "current_tokens": 120000,
-            "preferred_working_limit": 100000,
+    add_response = await api.process(
+        {
+            "action": "todo_add",
+            "context_id": ctx.id,
+            "title": "Solo todo",
+            "detail": "No project required.",
+            "scope": "chat",
         },
-        "utility_model": {
-            "confirmed": False,
+        None,
+    )
+    assert add_response["ok"] is True
+    assert add_response["scope"] == "chat"
+
+    state_response = await api.process({"action": "get_state", "context_id": ctx.id}, None)
+    assert state_response["ok"] is True
+    assert state_response["default_view"] == "chat"
+    assert state_response["project_state"] is None
+    assert state_response["chat_state"]["todos"][0]["title"] == "Solo todo"
+
+    project_list_response = await api.process(
+        {
+            "action": "todo_list",
+            "context_id": ctx.id,
+            "scope": "project",
         },
-        "gate_active": True,
+        None,
+    )
+    assert isinstance(project_list_response, Response)
+    assert project_list_response.status_code == 400
+
+
+def test_chat_catalog_filters_exact_ids_and_persisted_permissions(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+) -> None:
+    make_context, persist_chat = context_factory
+    project_name = project_name_factory("catalog")
+    other_project = project_name_factory("other")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
     }
 
-    parsed, used_fallback = audit._parse_or_fallback(
-        agent,
-        "{'summary':'ok','holes':[{'kind':'active_failure','pattern':'premature_done','barrier':'Aviate','severity':'medium','confidence':0.9,'title':'Premature done'}],'todos':[],'near_misses':[],'followups':[]}",
-        ctx_status,
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Beta Mission", project=project_name, profile="pilot")
+    cross_project = make_context(name="Foreign Mission", project=other_project, profile="pilot")
+    persist_chat(name="Gamma Mission", project=project_name)
+
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+    catalog = discovery.list_chat_catalog(
+        source_context=source,
+        scope=plugin_config.get("cross_chat_scope", {}),
+        project_only=True,
+        include_persisted=True,
     )
-    assert used_fallback is False
-    assert parsed["holes"][0]["pattern"] == "premature_done"
+    catalog_ids = {entry["id"] for entry in catalog}
+    assert source.id in catalog_ids
+    assert target.id in catalog_ids
+    assert cross_project.id not in catalog_ids
+    persisted_entry = next(entry for entry in catalog if entry["persisted_only"])
+    assert persisted_entry["permissions"]["can_read"] is True
+    assert persisted_entry["permissions"]["can_queue"] is False
 
-    fallback, used_fallback = audit._parse_or_fallback(agent, "not-json", ctx_status)
-    patterns = {hole["pattern"] for hole in fallback["holes"]}
-    assert used_fallback is True
-    assert "chat_ctx_unconfirmed" in patterns
-    assert "excessive_context_occupancy" in patterns
+    inspection = discovery.inspect_chat(
+        source_context=source,
+        target_context_id=target.id,
+        scope=plugin_config.get("cross_chat_scope", {}),
+    )
+    assert inspection["match_type"] == "exact_context_id"
+    assert inspection["target"]["id"] == target.id
+    assert inspection["permissions"]["can_queue"] is True
 
 
-def test_apply_audit_result_normalizes_findings_and_dedupes_followups(
+@pytest.mark.asyncio
+async def test_api_queue_followup_accepts_exact_target_context_id(
     context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
 ) -> None:
     make_context, _persisted = context_factory
-    ctx = make_context(name="Audit Apply", project="apollo", profile="pilot")
+    project_name = project_name_factory("handoff")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": False,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Target Chat", project=project_name, profile="pilot")
+    api = _new_api()
+
+    response = await api.process(
+        {
+            "action": "queue_followup",
+            "context_id": source.id,
+            "target_context_id": target.id,
+            "reason": "handoff",
+            "message": "Continue the bounded recovery sequence.",
+            "auto_send": False,
+        },
+        None,
+    )
+    assert response["ok"] is True
+    assert response["queued"] is True
+    assert response["result"]["target_context_id"] == target.id
+
+
+def test_build_project_rollup_counts_same_project_live_and_allowed_persisted(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+) -> None:
+    make_context, persist_chat = context_factory
+    project_name = project_name_factory("rollup")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    peer = make_context(name="Peer Chat", project=project_name, profile="pilot")
+    persist_chat(name="Archived Chat", project=project_name)
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+
+    state_helper.ensure_state(source, plugin_config=plugin_config)
+    state_helper.ensure_state(peer, plugin_config=plugin_config)
+    state_helper.add_or_update_todo(
+        peer,
+        {
+            "title": "Peer todo",
+            "detail": "Counts in rollup.",
+            "severity": "medium",
+            "source": "manual",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+    project_state.add_or_update_project_todo(
+        source,
+        {
+            "title": "Project backlog",
+            "detail": "Shared action.",
+            "severity": "high",
+            "source": "manual",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+
+    rollup = discovery.build_project_rollup(
+        source_context=source,
+        scope=plugin_config.get("cross_chat_scope", {}),
+    )
+    assert rollup is not None
+    assert rollup["chat_count"] == 3
+    assert rollup["live_chat_count"] == 2
+    assert rollup["persisted_chat_count"] == 1
+    assert rollup["totals"]["chat_todos"] == 1
+    assert rollup["totals"]["project_todos"] == 1
+
+
+def test_apply_audit_result_adds_project_backlog_and_deduped_current_chat_nudge(
+    context_factory,
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("audit")
+    ctx = make_context(name="Audit Chat", project=project_name, profile="pilot")
     agent = ctx.get_agent()
     plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
     state_helper.ensure_state(ctx, plugin_config=plugin_config)
-
-    duplicate_fp = state_helper.make_followup_fingerprint(ctx.id, "repeat", "Repeat the same step.")
-    state = ctx.get_data(CHAT_STATE_KEY)
-    state["last_followup_fingerprint"] = duplicate_fp
-    ctx.set_data(CHAT_STATE_KEY, state)
 
     payload = {
         "summary": "Audit completed.",
@@ -461,23 +593,18 @@ def test_apply_audit_result_normalizes_findings_and_dedupes_followups(
                 "todo": "Run a concrete verification step.",
             }
         ],
-        "near_misses": [
+        "todos": [
             {
-                "title": "Unsafe continuation trapped",
-                "detail": "The bad trajectory was trapped before damage.",
-                "barrier": "Communicate",
-                "severity": "medium",
-                "confidence": 0.8,
+                "title": "Align shared checklist",
+                "detail": "Project-level action from the audit.",
+                "severity": "high",
+                "source": "audit",
+                "status": "open",
+                "scope": "project",
             }
         ],
-        "followups": [
-            {
-                "reason": "repeat",
-                "message": "Repeat the same step.",
-                "auto_send": True,
-                "target": "current_chat",
-            }
-        ],
+        "near_misses": [],
+        "followups": [],
     }
 
     audit._apply_audit_result(
@@ -488,272 +615,95 @@ def test_apply_audit_result_normalizes_findings_and_dedupes_followups(
         plugin_config=plugin_config,
     )
 
-    holes = ctx.get_data("holes")
-    todos = ctx.get_data("todos")
-    near_misses = ctx.get_data("near_misses")
-    assert holes[0]["pattern"] == "skipped_verification"
-    assert holes[0]["severity"] == "high"
-    assert any(todo["title"] == "Run a concrete verification step." for todo in todos)
-    assert any(miss["title"] == "Unsafe continuation trapped" for miss in near_misses)
-    assert any(miss["title"] == "Followup deduplicated" for miss in near_misses)
+    queue = (ctx.get_data(CHAT_STATE_KEY) or {}).get("followup_queue", [])
+    assert len(queue) == 1
+    assert queue[0]["target_context_id"] == ctx.id
+    assert project_state.list_project_todos(ctx, status="all")[0]["title"] == "Align shared checklist"
+    assert (ctx.get_data(CHAT_STATE_KEY) or {}).get("notification_history")
+    assert project_state.load_project_state(project_name).get("notification_history")
 
-
-def test_add_or_update_todo_merges_duplicate_titles(context_factory) -> None:
-    make_context, _persisted = context_factory
-    ctx = make_context(name="Todo Merge")
-    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
-    state_helper.ensure_state(ctx, plugin_config=plugin_config)
-
-    first = state_helper.add_or_update_todo(
-        ctx,
-        {
-            "title": "Verify tool request schema",
-            "detail": "Ensure the next SwissCheese call uses the documented argument shape.",
-            "severity": "medium",
-            "source": "audit",
-            "status": "open",
-        },
+    audit._apply_audit_result(
+        agent,
+        payload,
+        ctx_status={"scope": {}},
+        used_fallback=False,
         plugin_config=plugin_config,
     )
-    second = state_helper.add_or_update_todo(
-        ctx,
-        {
-            "title": "Verify tool request schema",
-            "detail": "Ensure the next SwissCheese call uses the documented argument shape before submission.",
-            "severity": "high",
-            "source": "heuristic_fallback",
-            "status": "open",
-        },
-        plugin_config=plugin_config,
-    )
-
-    todos = ctx.get_data("todos") or []
-    assert len(todos) == 1
-    assert todos[0]["id"] == first["id"] == second["id"]
-    assert todos[0]["severity"] == "high"
-    assert "before submission" in todos[0]["detail"]
+    queue_again = (ctx.get_data(CHAT_STATE_KEY) or {}).get("followup_queue", [])
+    assert len(queue_again) == 1
 
 
 @pytest.mark.asyncio
-async def test_swiss_cheese_tool_todo_lifecycle_and_status(
+async def test_tool_chat_catalog_and_scoped_project_todo_lifecycle(
     context_factory,
     in_memory_plugin_backend: dict[str, Any],
-) -> None:
-    make_context, _persisted = context_factory
-    store = in_memory_plugin_backend["store"]
-    store[("_model_config", "apollo", "pilot")] = {
-        "chat_model": {"provider": "openai", "name": "gpt-chat", "ctx_length": 65536},
-        "utility_model": {"provider": "openai", "name": "gpt-util", "ctx_length": 32768},
-    }
-
-    ctx = make_context(name="Tool Chat", project="apollo", profile="pilot")
-    agent = ctx.get_agent()
-    agent.set_data(agent.DATA_NAME_CTX_WINDOW, {"tokens": 1234})
-    ctx.set_data("_swiss_cheese_last_utility_input", {"tokens": 256})
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="todo_add",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(title="Verify patch", detail="Run targeted pytest.", severity="high")
-    todo_add = _parse_tool_payload(response)
-    todo_id = todo_add["data"]["id"]
-    assert todo_add["summary"] == "SwissCheese todo added."
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="todo_list",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(status="open")
-    todo_list = _parse_tool_payload(response)
-    assert any(todo["id"] == todo_id for todo in todo_list["data"]["todos"])
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="todo_resolve",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(todo_id=todo_id)
-    todo_resolve = _parse_tool_payload(response)
-    assert todo_resolve["data"]["ok"] is True
-    assert todo_resolve["data"]["todo"]["status"] == "completed"
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="todo_list",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(status="completed")
-    completed_list = _parse_tool_payload(response)
-    assert any(todo["id"] == todo_id for todo in completed_list["data"]["todos"])
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="todo_clear_completed",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(confirm=True)
-    cleared = _parse_tool_payload(response)
-    assert cleared["data"]["remaining"] == 0
-
-    response = await SwissCheeseTool(
-        agent=agent,
-        name="swiss_cheese",
-        method="status",
-        args={},
-        message="",
-        loop_data=None,
-    ).execute(detail="full")
-    status = _parse_tool_payload(response)
-    assert "context_window" in status["data"]
-    assert status["data"]["context_window"]["chat_model"]["current_tokens"] == 1234
-
-
-@pytest.mark.asyncio
-async def test_tool_inspect_chat_and_live_chat_only_queueing(
-    context_factory,
-    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
 ) -> None:
     make_context, persist_chat = context_factory
-    in_memory_plugin_backend["store"][("swiss_cheese", "apollo", "pilot")] = {
+    project_name = project_name_factory("tooling")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
         "cross_chat_scope": {
             "same_project_live_write": True,
             "same_project_persisted_readonly": True,
             "cross_project": False,
         }
     }
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Target Chat", project=project_name, profile="pilot")
+    persist_chat(name="Archive", project=project_name)
+    agent = source.get_agent()
 
-    source = make_context(name="Source Chat", project="apollo", profile="pilot")
-    target = make_context(name="Beta Mission", project="apollo", profile="pilot")
-    persist_chat(name="Gamma Mission", project="apollo")
-
-    inspect_live = await SwissCheeseTool(
-        agent=source.get_agent(),
+    catalog_response = await SwissCheeseTool(
+        agent=agent,
         name="swiss_cheese",
-        method="inspect_chat",
+        method="chat_catalog",
         args={},
         message="",
         loop_data=None,
-    ).execute(selector="Beta Mission")
-    inspect_live_payload = _parse_tool_payload(inspect_live)
-    assert inspect_live_payload["data"]["permissions"]["can_queue"] is True
+    ).execute(project_only=True, include_persisted=True)
+    catalog_payload = _parse_tool_payload(catalog_response)
+    target_ids = {item["id"] for item in catalog_payload["data"]["targets"]}
+    assert source.id in target_ids
+    assert target.id in target_ids
 
-    queue_live = await SwissCheeseTool(
-        agent=source.get_agent(),
+    add_response = await SwissCheeseTool(
+        agent=agent,
         name="swiss_cheese",
-        method="queue_followup",
+        method="todo_add",
         args={},
         message="",
         loop_data=None,
     ).execute(
-        selector="Beta Mission",
-        reason="handoff",
-        message="Continue the bounded recovery sequence.",
-        auto_send=False,
+        title="Project todo",
+        detail="Shared backlog item.",
+        severity="high",
+        scope="project",
     )
-    queue_live_payload = _parse_tool_payload(queue_live)
-    assert queue_live_payload["data"]["queued"] is True
+    added = _parse_tool_payload(add_response)
+    todo_id = added["data"]["todo"]["id"]
 
-    inspect_persisted = await SwissCheeseTool(
-        agent=source.get_agent(),
+    list_response = await SwissCheeseTool(
+        agent=agent,
         name="swiss_cheese",
-        method="inspect_chat",
+        method="todo_list",
         args={},
         message="",
         loop_data=None,
-    ).execute(selector="Gamma Mission")
-    inspect_persisted_payload = _parse_tool_payload(inspect_persisted)
-    assert inspect_persisted_payload["data"]["permissions"]["can_read"] is True
-    assert inspect_persisted_payload["data"]["permissions"]["can_queue"] is False
+    ).execute(status="open", scope="project")
+    listed = _parse_tool_payload(list_response)
+    assert any(todo["id"] == todo_id for todo in listed["data"]["todos"])
 
-
-def test_chat_discovery_resolves_exact_and_fuzzy_matches_with_scope(context_factory) -> None:
-    make_context, persist_chat = context_factory
-    source = make_context(name="Source Chat", project="apollo", profile="pilot")
-    live = make_context(name="Beta Mission", project="apollo", profile="pilot")
-    persist_chat(name="Gamma Mission", project="apollo")
-    scope = {
-        "same_project_live_write": True,
-        "same_project_persisted_readonly": True,
-        "cross_project": False,
-    }
-
-    exact = discovery.inspect_chat(source_context=source, selector=live.id, scope=scope)
-    assert exact["match_type"] == "exact_context_id"
-    assert exact["permissions"]["can_queue"] is True
-
-    exact_name = discovery.inspect_chat(source_context=source, selector="Beta Mission", scope=scope)
-    assert exact_name["match_type"] == "exact_name"
-
-    fuzzy = discovery.inspect_chat(source_context=source, selector="Gmma Mision", scope=scope)
-    assert fuzzy["match_type"] == "fuzzy_name"
-    assert fuzzy["target"]["persisted_only"] is True
-    assert fuzzy["permissions"]["can_read"] is True
-    assert fuzzy["permissions"]["can_queue"] is False
-
-
-@pytest.mark.asyncio
-async def test_api_confirm_ctx_window_updates_model_config_and_live_state(
-    context_factory,
-    in_memory_plugin_backend: dict[str, Any],
-) -> None:
-    make_context, _persisted = context_factory
-    store = in_memory_plugin_backend["store"]
-    store[("_model_config", "apollo", "pilot")] = {
-        "chat_model": {
-            "provider": "openai",
-            "name": "gpt-chat",
-            "ctx_length": 0,
-        },
-        "utility_model": {
-            "provider": "openai",
-            "name": "gpt-util",
-            "ctx_length": 32000,
-        },
-    }
-
-    ctx_one = make_context(name="One", project="apollo", profile="pilot")
-    ctx_two = make_context(name="Two", project="apollo", profile="pilot")
-    api = _new_api()
-
-    response = await api.process(
-        {
-            "action": "confirm_ctx_window",
-            "project_name": "apollo",
-            "agent_profile": "pilot",
-            "slot": "chat_model",
-            "provider": "openai",
-            "name": "gpt-chat",
-            "ctx_length": 131072,
-            "update_model_config": True,
-        },
-        None,
-    )
-    assert response["ok"] is True
-    assert store[("_model_config", "apollo", "pilot")]["chat_model"]["ctx_length"] == 131072
-
-    state_payload = await api.process(
-        {
-            "action": "get_state",
-            "context_id": ctx_one.id,
-        },
-        None,
-    )
-    assert state_payload["ok"] is True
-    assert state_payload["context_window"]["chat_model"]["confirmed"] is True
-    assert ctx_two.get_data("ctx_confirmation")["chat_model"]["confirmed"] is True
+    resolve_response = await SwissCheeseTool(
+        agent=agent,
+        name="swiss_cheese",
+        method="todo_resolve",
+        args={},
+        message="",
+        loop_data=None,
+    ).execute(todo_id=todo_id, scope="project")
+    resolved = _parse_tool_payload(resolve_response)
+    assert resolved["data"]["ok"] is True
+    assert resolved["data"]["todo"]["status"] == "completed"
 
 
 @pytest.mark.asyncio

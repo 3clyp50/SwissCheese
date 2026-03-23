@@ -6,7 +6,7 @@ from agent import AgentContext
 from helpers.api import ApiHandler, Request, Response
 
 from usr.plugins.swiss_cheese.helpers import config as swiss_config
-from usr.plugins.swiss_cheese.helpers import context_window, discovery, state as state_helper
+from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
 
 
 def iso_now() -> str:
@@ -19,12 +19,16 @@ class SwissCheese(ApiHandler):
 
         if action == "get_state":
             return self._get_state(input)
+        if action == "list_chat_targets":
+            return self._list_chat_targets(input)
         if action == "inspect_chat":
             return self._inspect_chat(input)
         if action == "confirm_ctx_window":
             return self._confirm_ctx_window(input)
         if action == "todo_add":
             return self._todo_add(input)
+        if action == "todo_list":
+            return self._todo_list(input)
         if action == "todo_resolve":
             return self._todo_resolve(input)
         if action == "todo_clear_completed":
@@ -64,11 +68,7 @@ class SwissCheese(ApiHandler):
             context_window.mirror_context_window_status(context, ctx_status, recovery_budget, cross_chat_scope)
             state_helper.sync_output_data(context, plugin_config=plugin_config, dirty=True)
 
-    def _get_state(self, input: dict) -> dict | Response:
-        context = self._get_context(input)
-        if context is None:
-            return Response(status=404, response="Context not found")
-
+    def _build_state_payload(self, context: AgentContext) -> dict[str, object]:
         agent = context.get_agent()
         plugin_config = swiss_config.get_plugin_config(agent)
         state_helper.ensure_state(context, plugin_config=plugin_config)
@@ -81,17 +81,71 @@ class SwissCheese(ApiHandler):
         )
         state_helper.sync_output_data(context, plugin_config=plugin_config, dirty=True)
 
+        project_name = project_state.get_project_name(context)
+        project_state_payload = None
+        project_rollup = None
+        available_views = ["chat"]
+        default_view = "chat"
+
+        if project_name:
+            project_payload = project_state.get_project_state_for_context(context) or {}
+            project_state_payload = {
+                "project_name": project_name,
+                "project_title": str((context.get_output_data("project") or {}).get("title", "") or project_name),
+                "todos": project_state.list_project_todos(context, status="all"),
+                "notification_history": list(project_payload.get("notification_history", []) or []),
+                "updated_at": str(project_payload.get("updated_at", "") or ""),
+            }
+            project_rollup = discovery.build_project_rollup(
+                source_context=context,
+                scope=plugin_config.get("cross_chat_scope", {}),
+            )
+            available_views.append("project")
+            default_view = "project"
+
         return {
             "ok": True,
             "context_id": context.id,
             "state": state_helper.get_state_bundle(context),
+            "chat_state": state_helper.get_state_bundle(context),
+            "project_state": project_state_payload,
+            "project_rollup": project_rollup,
+            "available_views": available_views,
+            "default_view": default_view,
             "context_window": ctx_status,
             "model_snapshot": {
                 "chat_model": ctx_status.get("chat_model", {}),
                 "utility_model": ctx_status.get("utility_model", {}),
             },
             "scope": plugin_config.get("cross_chat_scope", {}),
+            "catalog_defaults": {
+                "project_only": bool(project_name),
+                "include_persisted": True,
+            },
         }
+
+    def _normalize_scope(self, input: dict) -> str:
+        scope = str(input.get("scope", "chat") or "chat").strip().lower()
+        return scope if scope in {"chat", "project"} else "chat"
+
+    def _get_state(self, input: dict) -> dict | Response:
+        context = self._get_context(input)
+        if context is None:
+            return Response(status=404, response="Context not found")
+        return self._build_state_payload(context)
+
+    def _list_chat_targets(self, input: dict) -> dict | Response:
+        context = self._get_context(input)
+        if context is None:
+            return Response(status=404, response="Context not found")
+        plugin_config = swiss_config.get_plugin_config(context.get_agent())
+        targets = discovery.list_chat_catalog(
+            source_context=context,
+            scope=plugin_config.get("cross_chat_scope", {}),
+            project_only=bool(input.get("project_only", False)),
+            include_persisted=bool(input.get("include_persisted", True)),
+        )
+        return {"ok": True, "targets": targets}
 
     def _inspect_chat(self, input: dict) -> dict | Response:
         context = self._get_context(input)
@@ -99,11 +153,13 @@ class SwissCheese(ApiHandler):
             return Response(status=404, response="Context not found")
         agent = context.get_agent()
         plugin_config = swiss_config.get_plugin_config(agent)
-        selector = str(input.get("selector", "") or "")
         inspection = discovery.inspect_chat(
             source_context=context,
-            selector=selector,
+            selector=str(input.get("selector", "") or ""),
+            target_context_id=str(input.get("target_context_id", "") or ""),
             scope=plugin_config.get("cross_chat_scope", {}),
+            project_only=bool(input.get("project_only", False)),
+            include_persisted=bool(input.get("include_persisted", True)),
         )
         return {"ok": True, "inspection": inspection}
 
@@ -166,38 +222,82 @@ class SwissCheese(ApiHandler):
         title = str(input.get("title", "") or "").strip()
         if not title:
             return Response(status=400, response="title is required")
+        scope = self._normalize_scope(input)
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
-        todo = state_helper.add_or_update_todo(
-            context,
-            {
-                "title": title,
-                "detail": str(input.get("detail", "") or ""),
-                "severity": str(input.get("severity", "medium") or "medium"),
-                "source": "api",
-                "status": "open",
-            },
-            plugin_config=plugin_config,
-        )
-        return {"ok": True, "todo": todo}
+
+        if scope == "project":
+            todo = project_state.add_or_update_project_todo(
+                context,
+                {
+                    "title": title,
+                    "detail": str(input.get("detail", "") or ""),
+                    "severity": str(input.get("severity", "medium") or "medium"),
+                    "source": "api",
+                    "status": "open",
+                },
+                plugin_config=plugin_config,
+            )
+            if todo is None:
+                return Response(status=400, response="Project scope requires an active project")
+        else:
+            todo = state_helper.add_or_update_todo(
+                context,
+                {
+                    "title": title,
+                    "detail": str(input.get("detail", "") or ""),
+                    "severity": str(input.get("severity", "medium") or "medium"),
+                    "source": "api",
+                    "status": "open",
+                },
+                plugin_config=plugin_config,
+            )
+        return {"ok": True, "scope": scope, "todo": todo}
+
+    def _todo_list(self, input: dict) -> dict | Response:
+        context = self._get_context(input)
+        if context is None:
+            return Response(status=404, response="Context not found")
+        scope = self._normalize_scope(input)
+        status = str(input.get("status", "open") or "open")
+        plugin_config = swiss_config.get_plugin_config(context.get_agent())
+        if scope == "project":
+            todos = project_state.list_project_todos(context, status=status)
+            if not project_state.get_project_name(context):
+                return Response(status=400, response="Project scope requires an active project")
+        else:
+            todos = state_helper.list_todos(context, status=status, plugin_config=plugin_config)
+        return {"ok": True, "scope": scope, "status": status, "todos": todos}
 
     def _todo_resolve(self, input: dict) -> dict | Response:
         context = self._get_context(input)
         if context is None:
             return Response(status=404, response="Context not found")
         todo_id = str(input.get("todo_id", "") or "")
+        scope = self._normalize_scope(input)
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
-        todo = state_helper.resolve_todo(context, todo_id, plugin_config=plugin_config)
+        if scope == "project":
+            todo = project_state.resolve_project_todo(context, todo_id)
+            if not project_state.get_project_name(context):
+                return Response(status=400, response="Project scope requires an active project")
+        else:
+            todo = state_helper.resolve_todo(context, todo_id, plugin_config=plugin_config)
         if todo is None:
             return Response(status=404, response="Todo not found")
-        return {"ok": True, "todo": todo}
+        return {"ok": True, "scope": scope, "todo": todo}
 
     def _todo_clear_completed(self, input: dict) -> dict | Response:
         context = self._get_context(input)
         if context is None:
             return Response(status=404, response="Context not found")
+        scope = self._normalize_scope(input)
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
-        remaining = state_helper.clear_completed_todos(context, plugin_config=plugin_config)
-        return {"ok": True, "remaining": remaining}
+        if scope == "project":
+            remaining = project_state.clear_completed_project_todos(context)
+            if remaining is None:
+                return Response(status=400, response="Project scope requires an active project")
+        else:
+            remaining = state_helper.clear_completed_todos(context, plugin_config=plugin_config)
+        return {"ok": True, "scope": scope, "remaining": remaining}
 
     def _queue_followup(self, input: dict) -> dict | Response:
         context = self._get_context(input)
@@ -210,13 +310,15 @@ class SwissCheese(ApiHandler):
 
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
         selector = str(input.get("selector", "") or "").strip()
+        requested_target_context_id = str(input.get("target_context_id", "") or "").strip()
         target_context_id = context.id
         inspection = None
 
-        if selector:
+        if selector or requested_target_context_id:
             inspection = discovery.inspect_chat(
                 source_context=context,
                 selector=selector,
+                target_context_id=requested_target_context_id,
                 scope=plugin_config.get("cross_chat_scope", {}),
             )
             target = inspection.get("target") or {}

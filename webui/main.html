@@ -12,7 +12,7 @@
         <div class="swiss-cheese-header">
           <div>
             <div class="swiss-cheese-title">SwissCheese</div>
-            <div class="swiss-cheese-subtitle">Defense layers, holes, queued recovery, and situational awareness for the active chat.</div>
+            <div class="swiss-cheese-subtitle">Project-aware resilience, shared backlog hygiene, exact chat targeting, and bounded proactive followups.</div>
           </div>
           <div class="swiss-cheese-header-actions">
             <button class="btn" @click="$store.swissCheese.refresh()" :disabled="$store.swissCheese.loading">Refresh</button>
@@ -25,186 +25,306 @@
           <span>Refreshing SwissCheese state...</span>
         </div>
 
-        <template x-if="$store.swissCheese.state">
-          <div class="swiss-cheese-grid">
-            <section class="swiss-card">
-              <div class="swiss-card-title">Context Window</div>
-              <div class="swiss-metric-list">
-                <div class="swiss-metric">
-                  <span>Main model</span>
-                  <strong x-text="`${$store.swissCheese.contextWindow?.chat_model?.provider || ''}/${$store.swissCheese.contextWindow?.chat_model?.name || ''}`"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Chat gate</span>
-                  <strong x-text="$store.swissCheese.contextWindow?.gate_active ? 'Blocked for autonomy' : 'Open'"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Main tokens</span>
-                  <strong x-text="$store.swissCheese.contextWindow?.chat_model?.current_tokens || 0"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Remaining budget</span>
-                  <strong x-text="$store.swissCheese.contextWindow?.chat_model?.remaining_budget || 0"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Utility confidence</span>
-                  <strong x-text="$store.swissCheese.contextWindow?.utility_confidence || 'normal'"></strong>
-                </div>
+        <template x-if="$store.swissCheese.chatState">
+          <div class="swiss-cheese-body">
+            <div class="swiss-toolbar">
+              <div class="swiss-view-switch" x-show="$store.swissCheese.hasProjectView">
+                <button
+                  class="btn btn-small"
+                  :class="{ 'btn-strong': $store.swissCheese.activeView === 'project' }"
+                  @click="$store.swissCheese.setActiveView('project')"
+                >
+                  Current Project
+                </button>
+                <button
+                  class="btn btn-small"
+                  :class="{ 'btn-strong': $store.swissCheese.activeView === 'chat' }"
+                  @click="$store.swissCheese.setActiveView('chat')"
+                >
+                  Active Chat
+                </button>
               </div>
-            </section>
-
-            <section class="swiss-card">
-              <div class="swiss-card-title">Recovery Budget</div>
-              <div class="swiss-metric-list">
-                <div class="swiss-metric">
-                  <span>Used cycles</span>
-                  <strong x-text="$store.swissCheese.state?.recovery_budget?.used_cycles || 0"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Max cycles</span>
-                  <strong x-text="$store.swissCheese.state?.recovery_budget?.max_cycles || 0"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Remaining</span>
-                  <strong x-text="$store.swissCheese.state?.recovery_budget?.remaining_cycles || 0"></strong>
-                </div>
-                <div class="swiss-metric">
-                  <span>Audit state</span>
-                  <strong x-text="$store.swissCheese.state?.audit_status?.state || 'idle'"></strong>
-                </div>
+              <div class="swiss-filter-row">
+                <label class="swiss-check">
+                  <input type="checkbox" x-model="$store.swissCheese.projectOnly" @change="await $store.swissCheese.updateCatalogFilters()">
+                  <span>Current project only</span>
+                </label>
+                <label class="swiss-check">
+                  <input type="checkbox" x-model="$store.swissCheese.includePersisted" @change="await $store.swissCheese.updateCatalogFilters()">
+                  <span>Include persisted chats</span>
+                </label>
               </div>
-            </section>
+            </div>
 
-            <section class="swiss-card swiss-card-wide">
-              <div class="swiss-card-title">Barrier Stack</div>
-              <div class="swiss-barrier-grid">
-                <template x-for="card in $store.swissCheese.barrierCards" :key="card.barrier">
-                  <div class="swiss-barrier">
-                    <div class="swiss-barrier-title" x-text="card.barrier"></div>
-                    <template x-if="card.holes.length === 0">
-                      <div class="swiss-empty">No open holes.</div>
-                    </template>
-                    <template x-if="card.holes.length > 0">
-                      <div class="swiss-hole-list">
-                        <template x-for="hole in card.holes" :key="hole.id">
-                          <div class="swiss-hole">
-                            <div class="swiss-hole-header">
-                              <strong x-text="hole.title"></strong>
-                              <span class="swiss-badge" x-text="hole.severity"></span>
-                            </div>
-                            <div class="swiss-hole-detail" x-text="hole.trajectory || hole.evidence || ''"></div>
+            <div class="swiss-cheese-grid">
+              <section class="swiss-card">
+                <div class="swiss-card-title">Context Window</div>
+                <div class="swiss-metric-list">
+                  <div class="swiss-metric">
+                    <span>Main model</span>
+                    <strong x-text="`${$store.swissCheese.contextWindow?.chat_model?.provider || ''}/${$store.swissCheese.contextWindow?.chat_model?.name || ''}`"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Chat gate</span>
+                    <strong x-text="$store.swissCheese.contextWindow?.gate_active ? 'Blocked for autonomy' : 'Open'"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Main tokens</span>
+                    <strong x-text="$store.swissCheese.contextWindow?.chat_model?.current_tokens || 0"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Remaining budget</span>
+                    <strong x-text="$store.swissCheese.contextWindow?.chat_model?.remaining_budget || 0"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Utility confidence</span>
+                    <strong x-text="$store.swissCheese.contextWindow?.utility_confidence || 'normal'"></strong>
+                  </div>
+                </div>
+              </section>
+
+              <section class="swiss-card">
+                <div class="swiss-card-title">Recovery Budget</div>
+                <div class="swiss-metric-list">
+                  <div class="swiss-metric">
+                    <span>Used cycles</span>
+                    <strong x-text="$store.swissCheese.chatState?.recovery_budget?.used_cycles || 0"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Max cycles</span>
+                    <strong x-text="$store.swissCheese.chatState?.recovery_budget?.max_cycles || 0"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Remaining</span>
+                    <strong x-text="$store.swissCheese.chatState?.recovery_budget?.remaining_cycles || 0"></strong>
+                  </div>
+                  <div class="swiss-metric">
+                    <span>Audit state</span>
+                    <strong x-text="$store.swissCheese.chatState?.audit_status?.state || 'idle'"></strong>
+                  </div>
+                </div>
+              </section>
+
+              <template x-if="$store.swissCheese.activeView === 'chat'">
+                <section class="swiss-card swiss-card-wide">
+                  <div class="swiss-card-title">Barrier Stack</div>
+                  <div class="swiss-barrier-grid">
+                    <template x-for="card in $store.swissCheese.barrierCards" :key="card.barrier">
+                      <div class="swiss-barrier">
+                        <div class="swiss-barrier-title" x-text="card.barrier"></div>
+                        <template x-if="card.holes.length === 0">
+                          <div class="swiss-empty">No open holes.</div>
+                        </template>
+                        <template x-if="card.holes.length > 0">
+                          <div class="swiss-hole-list">
+                            <template x-for="hole in card.holes" :key="hole.id">
+                              <div class="swiss-hole">
+                                <div class="swiss-hole-header">
+                                  <strong x-text="hole.title"></strong>
+                                  <span class="swiss-badge" x-text="hole.severity"></span>
+                                </div>
+                                <div class="swiss-hole-detail" x-text="hole.trajectory || hole.evidence || ''"></div>
+                              </div>
+                            </template>
                           </div>
                         </template>
                       </div>
                     </template>
                   </div>
+                </section>
+              </template>
+
+              <template x-if="$store.swissCheese.activeView === 'project' && $store.swissCheese.projectRollup">
+                <section class="swiss-card swiss-card-wide">
+                  <div class="swiss-card-title">Project Overview</div>
+                  <div class="swiss-metric-list swiss-metric-list-inline">
+                    <div class="swiss-metric">
+                      <span>Project</span>
+                      <strong x-text="$store.swissCheese.projectRollup?.project_title || $store.swissCheese.projectRollup?.project_name || ''"></strong>
+                    </div>
+                    <div class="swiss-metric">
+                      <span>Chats</span>
+                      <strong x-text="$store.swissCheese.projectRollup?.chat_count || 0"></strong>
+                    </div>
+                    <div class="swiss-metric">
+                      <span>Chat holes</span>
+                      <strong x-text="$store.swissCheese.projectTotals?.holes || 0"></strong>
+                    </div>
+                    <div class="swiss-metric">
+                      <span>Chat todos</span>
+                      <strong x-text="$store.swissCheese.projectTotals?.chat_todos || 0"></strong>
+                    </div>
+                    <div class="swiss-metric">
+                      <span>Project backlog</span>
+                      <strong x-text="$store.swissCheese.projectTotals?.project_todos || 0"></strong>
+                    </div>
+                  </div>
+                  <div class="swiss-list">
+                    <template x-for="chat in $store.swissCheese.projectChatSummaries" :key="chat.id">
+                      <div class="swiss-list-item swiss-chat-summary">
+                        <div>
+                          <strong x-text="chat.name"></strong>
+                          <div class="swiss-hole-detail" x-text="$store.swissCheese.targetLabel(chat, { includeQueueability: true })"></div>
+                        </div>
+                        <div class="swiss-summary-metrics">
+                          <span x-text="`holes ${chat.state_excerpt?.hole_count || 0}`"></span>
+                          <span x-text="`chat todos ${chat.state_excerpt?.open_todo_count || 0}`"></span>
+                          <span x-text="`near misses ${chat.state_excerpt?.near_miss_count || 0}`"></span>
+                          <span x-text="`queue ${chat.state_excerpt?.queue_count || 0}`"></span>
+                        </div>
+                      </div>
+                    </template>
+                  </div>
+                </section>
+              </template>
+
+              <section class="swiss-card">
+                <div class="swiss-card-title">Chat Todos</div>
+                <div class="swiss-card-actions">
+                  <button class="btn btn-small" @click="$store.swissCheese.clearCompletedTodos('chat')">Clear completed</button>
+                </div>
+                <template x-if="!($store.swissCheese.chatState?.todos || []).length">
+                  <div class="swiss-empty">No chat-local SwissCheese todos.</div>
                 </template>
-              </div>
-            </section>
-
-            <section class="swiss-card">
-              <div class="swiss-card-title">Todos</div>
-              <div class="swiss-card-actions">
-                <button class="btn btn-small" @click="$store.swissCheese.clearCompletedTodos()">Clear completed</button>
-              </div>
-              <template x-if="!($store.swissCheese.state?.todos || []).length">
-                <div class="swiss-empty">No open SwissCheese todos.</div>
-              </template>
-              <template x-if="($store.swissCheese.state?.todos || []).length">
-                <div class="swiss-todo-list">
-                  <template x-for="todo in ($store.swissCheese.state?.todos || [])" :key="todo.id">
-                    <div class="swiss-todo">
-                      <div>
-                        <strong x-text="todo.title"></strong>
-                        <div class="swiss-hole-detail" x-text="todo.detail || ''"></div>
+                <template x-if="($store.swissCheese.chatState?.todos || []).length">
+                  <div class="swiss-todo-list">
+                    <template x-for="todo in ($store.swissCheese.chatState?.todos || [])" :key="todo.id">
+                      <div class="swiss-todo">
+                        <div>
+                          <strong x-text="todo.title"></strong>
+                          <div class="swiss-hole-detail" x-text="todo.detail || ''"></div>
+                        </div>
+                        <button class="btn btn-small" @click="$store.swissCheese.resolveTodo(todo.id, 'chat')" x-show="todo.status !== 'completed'">Resolve</button>
                       </div>
-                      <button class="btn btn-small" @click="$store.swissCheese.resolveTodo(todo.id)" x-show="todo.status !== 'completed'">Resolve</button>
-                    </div>
-                  </template>
-                </div>
-              </template>
-            </section>
+                    </template>
+                  </div>
+                </template>
+              </section>
 
-            <section class="swiss-card">
-              <div class="swiss-card-title">Near Misses</div>
-              <template x-if="!($store.swissCheese.state?.near_misses || []).length">
-                <div class="swiss-empty">No near misses recorded yet.</div>
-              </template>
-              <template x-if="($store.swissCheese.state?.near_misses || []).length">
-                <div class="swiss-list">
-                  <template x-for="item in ($store.swissCheese.state?.near_misses || [])" :key="item.id">
-                    <div class="swiss-list-item">
-                      <strong x-text="item.title"></strong>
-                      <div class="swiss-hole-detail" x-text="item.detail"></div>
-                    </div>
-                  </template>
+              <section class="swiss-card">
+                <div class="swiss-card-title">Project Backlog</div>
+                <div class="swiss-card-actions" x-show="$store.swissCheese.projectState">
+                  <button class="btn btn-small" @click="$store.swissCheese.clearCompletedTodos('project')">Clear completed</button>
                 </div>
-              </template>
-            </section>
-
-            <section class="swiss-card swiss-card-wide">
-              <div class="swiss-card-title">Followup Queue</div>
-              <template x-if="!(($store.swissCheese.state?.swiss_cheese_state?.followup_queue || []).length)">
-                <div class="swiss-empty">No queued followups.</div>
-              </template>
-              <template x-if="($store.swissCheese.state?.swiss_cheese_state?.followup_queue || []).length">
-                <div class="swiss-list">
-                  <template x-for="item in ($store.swissCheese.state?.swiss_cheese_state?.followup_queue || [])" :key="item.fingerprint">
-                    <div class="swiss-list-item swiss-followup-item">
-                      <div>
-                        <strong x-text="item.reason"></strong>
-                        <div class="swiss-hole-detail" x-text="item.text"></div>
+                <template x-if="!$store.swissCheese.projectState">
+                  <div class="swiss-empty">No active project. Project backlog is unavailable in this chat.</div>
+                </template>
+                <template x-if="$store.swissCheese.projectState && !(($store.swissCheese.projectState?.todos || []).length)">
+                  <div class="swiss-empty">No shared project backlog items.</div>
+                </template>
+                <template x-if="$store.swissCheese.projectState && (($store.swissCheese.projectState?.todos || []).length)">
+                  <div class="swiss-todo-list">
+                    <template x-for="todo in ($store.swissCheese.projectState?.todos || [])" :key="todo.id">
+                      <div class="swiss-todo">
+                        <div>
+                          <strong x-text="todo.title"></strong>
+                          <div class="swiss-hole-detail" x-text="todo.detail || ''"></div>
+                          <div class="swiss-todo-origin" x-text="todo.origin_context_name ? `Origin: ${todo.origin_context_name}` : ''"></div>
+                        </div>
+                        <button class="btn btn-small" @click="$store.swissCheese.resolveTodo(todo.id, 'project')" x-show="todo.status !== 'completed'">Resolve</button>
                       </div>
-                      <button class="btn btn-small" @click="$store.swissCheese.removeFollowup(item.fingerprint)">Remove</button>
-                    </div>
-                  </template>
-                </div>
-              </template>
+                    </template>
+                  </div>
+                </template>
+              </section>
 
-              <div class="swiss-form-grid">
-                <input type="text" placeholder="Target chat selector (optional)" x-model="$store.swissCheese.followup.selector">
-                <input type="text" placeholder="Reason" x-model="$store.swissCheese.followup.reason">
-                <textarea rows="4" placeholder="Followup message" x-model="$store.swissCheese.followup.message"></textarea>
-                <label class="swiss-check">
-                  <input type="checkbox" x-model="$store.swissCheese.followup.auto_send">
-                  <span>Auto-send when allowed</span>
-                </label>
-                <button class="btn" @click="$store.swissCheese.queueFollowup()">Queue followup</button>
-              </div>
-            </section>
+              <section class="swiss-card">
+                <div class="swiss-card-title">Near Misses</div>
+                <template x-if="!($store.swissCheese.chatState?.near_misses || []).length">
+                  <div class="swiss-empty">No near misses recorded yet.</div>
+                </template>
+                <template x-if="($store.swissCheese.chatState?.near_misses || []).length">
+                  <div class="swiss-list">
+                    <template x-for="item in ($store.swissCheese.chatState?.near_misses || [])" :key="item.id">
+                      <div class="swiss-list-item">
+                        <strong x-text="item.title"></strong>
+                        <div class="swiss-hole-detail" x-text="item.detail"></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </section>
 
-            <section class="swiss-card swiss-card-wide">
-              <div class="swiss-card-title">Chat Inspector</div>
-              <div class="swiss-inspector">
-                <input type="text" placeholder="Exact context id, exact chat name, or fuzzy name" x-model="$store.swissCheese.inspectionSelector">
-                <button class="btn" @click="$store.swissCheese.inspectChat()">Inspect</button>
-              </div>
-              <template x-if="$store.swissCheese.inspection">
-                <div class="swiss-inspection-result">
-                  <div><strong>Match type:</strong> <span x-text="$store.swissCheese.inspection.match_type"></span></div>
-                  <div><strong>Target:</strong> <span x-text="$store.swissCheese.inspection.target ? `${$store.swissCheese.inspection.target.name} (${ $store.swissCheese.inspection.target.id })` : 'None'"></span></div>
-                  <div><strong>Readable:</strong> <span x-text="$store.swissCheese.inspection.permissions?.can_read ? 'yes' : 'no'"></span></div>
-                  <div><strong>Queueable:</strong> <span x-text="$store.swissCheese.inspection.permissions?.can_queue ? 'yes' : 'no'"></span></div>
-                </div>
-              </template>
-            </section>
+              <section class="swiss-card swiss-card-wide">
+                <div class="swiss-card-title">Followup Queue</div>
+                <template x-if="!(($store.swissCheese.chatState?.swiss_cheese_state?.followup_queue || []).length)">
+                  <div class="swiss-empty">No queued followups.</div>
+                </template>
+                <template x-if="($store.swissCheese.chatState?.swiss_cheese_state?.followup_queue || []).length">
+                  <div class="swiss-list">
+                    <template x-for="item in ($store.swissCheese.chatState?.swiss_cheese_state?.followup_queue || [])" :key="item.fingerprint">
+                      <div class="swiss-list-item swiss-followup-item">
+                        <div>
+                          <strong x-text="item.reason"></strong>
+                          <div class="swiss-hole-detail" x-text="item.text"></div>
+                        </div>
+                        <button class="btn btn-small" @click="$store.swissCheese.removeFollowup(item.fingerprint)">Remove</button>
+                      </div>
+                    </template>
+                  </div>
+                </template>
 
-            <section class="swiss-card swiss-card-wide">
-              <div class="swiss-card-title">Audit Trace</div>
-              <template x-if="!(($store.swissCheese.state?.swiss_cheese_state?.audit_trace || []).length)">
-                <div class="swiss-empty">No audit trace yet.</div>
-              </template>
-              <template x-if="($store.swissCheese.state?.swiss_cheese_state?.audit_trace || []).length">
-                <div class="swiss-list">
-                  <template x-for="entry in ($store.swissCheese.state?.swiss_cheese_state?.audit_trace || [])" :key="entry.created_at">
-                    <div class="swiss-list-item">
-                      <strong x-text="entry.summary"></strong>
-                      <div class="swiss-hole-detail" x-text="entry.hole_patterns?.join(', ') || ''"></div>
-                    </div>
-                  </template>
+                <div class="swiss-form-grid">
+                  <label>
+                    <span class="swiss-field-label">Target chat</span>
+                    <select x-model="$store.swissCheese.followup.target_context_id">
+                      <template x-for="target in $store.swissCheese.inspectableTargets" :key="target.id">
+                        <option
+                          :value="target.id"
+                          :disabled="!target.permissions?.can_queue"
+                          x-text="$store.swissCheese.targetLabel(target, { includeQueueability: true })"
+                        ></option>
+                      </template>
+                    </select>
+                  </label>
+                  <input type="text" placeholder="Reason" x-model="$store.swissCheese.followup.reason">
+                  <textarea rows="4" placeholder="Followup message" x-model="$store.swissCheese.followup.message"></textarea>
+                  <label class="swiss-check">
+                    <input type="checkbox" x-model="$store.swissCheese.followup.auto_send">
+                    <span>Auto-send when allowed</span>
+                  </label>
+                  <button class="btn" @click="$store.swissCheese.queueFollowup()">Queue followup</button>
                 </div>
-              </template>
-            </section>
+              </section>
+
+              <section class="swiss-card swiss-card-wide">
+                <div class="swiss-card-title">Chat Catalog</div>
+                <div class="swiss-inspector">
+                  <select x-model="$store.swissCheese.inspectionTargetId" @change="await $store.swissCheese.inspectChat()">
+                    <template x-for="target in $store.swissCheese.inspectableTargets" :key="target.id">
+                      <option :value="target.id" x-text="$store.swissCheese.targetLabel(target, { includeQueueability: true })"></option>
+                    </template>
+                  </select>
+                  <button class="btn" @click="$store.swissCheese.inspectChat()">Inspect</button>
+                </div>
+                <template x-if="$store.swissCheese.inspection">
+                  <div class="swiss-inspection-result">
+                    <div><strong>Match type:</strong> <span x-text="$store.swissCheese.inspection.match_type"></span></div>
+                    <div><strong>Target:</strong> <span x-text="$store.swissCheese.inspection.target ? `${$store.swissCheese.inspection.target.name} (${ $store.swissCheese.inspection.target.id })` : 'None'"></span></div>
+                    <div><strong>Readable:</strong> <span x-text="$store.swissCheese.inspection.permissions?.can_read ? 'yes' : 'no'"></span></div>
+                    <div><strong>Queueable:</strong> <span x-text="$store.swissCheese.inspection.permissions?.can_queue ? 'yes' : 'no'"></span></div>
+                    <div><strong>Project:</strong> <span x-text="$store.swissCheese.inspection.target?.project_title || $store.swissCheese.inspection.target?.project_name || 'none'"></span></div>
+                  </div>
+                </template>
+              </section>
+
+              <section class="swiss-card swiss-card-wide">
+                <div class="swiss-card-title">Audit Trace</div>
+                <template x-if="!(($store.swissCheese.chatState?.swiss_cheese_state?.audit_trace || []).length)">
+                  <div class="swiss-empty">No audit trace yet.</div>
+                </template>
+                <template x-if="($store.swissCheese.chatState?.swiss_cheese_state?.audit_trace || []).length">
+                  <div class="swiss-list">
+                    <template x-for="entry in ($store.swissCheese.chatState?.swiss_cheese_state?.audit_trace || [])" :key="entry.created_at">
+                      <div class="swiss-list-item">
+                        <strong x-text="entry.summary"></strong>
+                        <div class="swiss-hole-detail" x-text="entry.hole_patterns?.join(', ') || ''"></div>
+                      </div>
+                    </template>
+                  </div>
+                </template>
+              </section>
+            </div>
           </div>
         </template>
       </div>
@@ -231,12 +351,35 @@
     }
     .swiss-cheese-subtitle {
       color: var(--color-text-secondary);
-      max-width: 44rem;
+      max-width: 52rem;
     }
     .swiss-cheese-header-actions {
       display: flex;
       gap: 0.5rem;
       flex-wrap: wrap;
+    }
+    .swiss-cheese-body {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+    .swiss-toolbar {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .swiss-view-switch,
+    .swiss-filter-row {
+      display: flex;
+      gap: 0.5rem;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .btn-strong {
+      border-color: var(--color-primary);
+      box-shadow: inset 0 0 0 1px var(--color-primary);
     }
     .swiss-cheese-grid {
       display: grid;
@@ -265,6 +408,9 @@
     .swiss-metric-list {
       display: grid;
       gap: 0.5rem;
+    }
+    .swiss-metric-list-inline {
+      grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
     }
     .swiss-metric {
       display: flex;
@@ -304,11 +450,19 @@
       background: color-mix(in srgb, var(--color-panel) 95%, white 5%);
     }
     .swiss-todo,
-    .swiss-followup-item {
+    .swiss-followup-item,
+    .swiss-chat-summary {
       display: flex;
       justify-content: space-between;
       gap: 0.75rem;
       align-items: flex-start;
+    }
+    .swiss-summary-metrics {
+      display: flex;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      color: var(--color-text-secondary);
+      font-size: 0.9rem;
     }
     .swiss-hole-header {
       display: flex;
@@ -322,7 +476,8 @@
       text-transform: uppercase;
       opacity: 0.75;
     }
-    .swiss-hole-detail {
+    .swiss-hole-detail,
+    .swiss-todo-origin {
       color: var(--color-text-secondary);
       font-size: 0.9rem;
       white-space: pre-wrap;
@@ -335,6 +490,12 @@
       display: grid;
       gap: 0.65rem;
     }
+    .swiss-field-label {
+      display: inline-block;
+      margin-bottom: 0.25rem;
+      font-size: 0.85rem;
+      color: var(--color-text-secondary);
+    }
     .swiss-check {
       display: inline-flex;
       align-items: center;
@@ -345,8 +506,8 @@
       gap: 0.65rem;
       flex-wrap: wrap;
     }
-    .swiss-inspector input {
-      flex: 1 1 20rem;
+    .swiss-inspector select {
+      flex: 1 1 22rem;
     }
     .swiss-inspection-result {
       display: grid;
