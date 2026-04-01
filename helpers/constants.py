@@ -30,7 +30,20 @@ TRANSIENT_AUDIT_TASK_KEY = "_swiss_cheese_audit_task"
 TRANSIENT_LAST_UTILITY_INPUT_KEY = "_swiss_cheese_last_utility_input"
 TRANSIENT_AUTONOMY_ORIGIN_KEY = "_swiss_cheese_autonomy_origin"
 
-BARRIERS = ("Prepare", "Aviate", "Navigate", "Communicate", "Learn")
+BARRIERS = ("Readiness", "Stability", "Direction", "Coordination", "Learning")
+DEFAULT_BARRIER = "Direction"
+LEGACY_BARRIER_MAP = {
+    "prepare": "Readiness",
+    "readiness": "Readiness",
+    "aviate": "Stability",
+    "stability": "Stability",
+    "navigate": "Direction",
+    "direction": "Direction",
+    "communicate": "Coordination",
+    "coordination": "Coordination",
+    "learn": "Learning",
+    "learning": "Learning",
+}
 SEVERITIES = ("low", "medium", "high", "critical")
 KINDS = ("active_failure", "latent_condition")
 MODEL_SLOTS = ("chat_model", "utility_model")
@@ -57,3 +70,10 @@ LATENT_CONDITION_PATTERNS = (
 )
 
 DANGEROUS_AUTONOMOUS_PATTERNS = {"unsafe_tool_use"}
+
+
+def normalize_barrier(value: object, default: str = DEFAULT_BARRIER) -> str:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return default
+    return LEGACY_BARRIER_MAP.get(candidate.lower(), default)

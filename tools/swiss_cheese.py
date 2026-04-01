@@ -336,14 +336,50 @@ class SwissCheese(Tool):
         target = inspection.get("target") or {}
         if not target:
             return Response(
-                message=self._encode("Followup target was not found.", {"inspection": inspection, "ok": False}),
+                message=self._encode(
+                    "Followup target was not found.",
+                    {
+                        "inspection": inspection,
+                        "ok": False,
+                        "result": state_helper.record_blocked_followup(
+                            self.agent.context,
+                            target_key=target_key,
+                            target_context_id=target_context_id,
+                            target_name=selector or target_key or target_context_id,
+                            target_kind="chat",
+                            reason=reason,
+                            message=message,
+                            blocked_reason="target_not_found",
+                            auto_send=bool(auto_send),
+                            source="tool",
+                            plugin_config=plugin_config,
+                        ),
+                    },
+                ),
                 break_loop=False,
             )
         if not inspection.get("permissions", {}).get("can_queue", False):
             return Response(
                 message=self._encode(
                     "Followup target is not queueable in the current scope.",
-                    {"inspection": inspection, "ok": False},
+                    {
+                        "inspection": inspection,
+                        "ok": False,
+                        "result": state_helper.record_blocked_followup(
+                            self.agent.context,
+                            target_key=str(target.get("target_key", "") or target_key),
+                            target_context_id=str(target.get("context_id", "") or target_context_id),
+                            target_kind=str(target.get("kind", "chat") or "chat"),
+                            target_task_uuid=str(((target.get("scheduler") or {}) if isinstance(target.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+                            target_name=str(target.get("name", "") or selector or target_key or target_context_id),
+                            reason=reason,
+                            message=message,
+                            blocked_reason="target_not_queueable_in_scope",
+                            auto_send=bool(auto_send),
+                            source="tool",
+                            plugin_config=plugin_config,
+                        ),
+                    },
                 ),
                 break_loop=False,
             )

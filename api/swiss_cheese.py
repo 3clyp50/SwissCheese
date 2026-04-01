@@ -19,6 +19,8 @@ class SwissCheese(ApiHandler):
 
         if action == "get_state":
             return self._get_state(input)
+        if action == "get_config_context":
+            return self._get_config_context(input)
         if action == "list_targets":
             return self._list_targets(input)
         if action == "list_chat_targets":
@@ -39,6 +41,8 @@ class SwissCheese(ApiHandler):
             return self._todo_clear_completed(input)
         if action == "queue_followup":
             return self._queue_followup(input)
+        if action == "retry_followup":
+            return self._retry_followup(input)
         if action == "remove_followup":
             return self._remove_followup(input)
         if action == "bridge_followup":
@@ -52,25 +56,8 @@ class SwissCheese(ApiHandler):
             return AgentContext.current() or AgentContext.first()
         return AgentContext.get(context_id)
 
-    def _matching_live_scope_contexts(self, project_name: str, agent_profile: str) -> list[AgentContext]:
-        matches: list[AgentContext] = []
-        for context in AgentContext.all():
-            project = context.get_data("project") or ""
-            profile = context.agent0.config.profile or ""
-            if project == project_name and profile == agent_profile:
-                matches.append(context)
-        return matches
-
-    def _sync_live_scope_contexts(self, project_name: str, agent_profile: str) -> None:
-        for context in self._matching_live_scope_contexts(project_name, agent_profile):
-            agent = context.get_agent()
-            plugin_config = swiss_config.get_plugin_config(agent)
-            state_helper.ensure_state(context, plugin_config=plugin_config)
-            ctx_status = context_window.compute_context_window_status(agent, plugin_config=plugin_config)
-            recovery_budget = context.get_data("recovery_budget") or {"max_cycles": 0, "used_cycles": 0, "remaining_cycles": 0}
-            cross_chat_scope = plugin_config.get("cross_chat_scope", {})
-            context_window.mirror_context_window_status(context, ctx_status, recovery_budget, cross_chat_scope)
-            state_helper.sync_output_data(context, plugin_config=plugin_config, dirty=True)
+    def _sync_live_scope_contexts(self, project_name: str) -> None:
+        swiss_config.sync_live_scope_contexts(project_name)
 
     def _build_state_payload(self, context: AgentContext) -> dict[str, object]:
         agent = context.get_agent()
@@ -139,6 +126,46 @@ class SwissCheese(ApiHandler):
         scope = str(input.get("scope", "chat") or "chat").strip().lower()
         return scope if scope in {"chat", "project"} else "chat"
 
+    def _get_config_context(self, input: dict) -> dict:
+        context = self._get_context(input)
+        active_project_name = project_state.get_project_name(context) if context is not None else ""
+        active_agent_profile = str((context.agent0.config.profile if context is not None else input.get("agent_profile", "")) or "")
+        selected_project_name = str(input.get("project_name", "") or active_project_name or "")
+
+        plugin_scope = swiss_config.resolve_plugin_config_scope(
+            project_name=selected_project_name,
+            agent_profile=active_agent_profile,
+        )
+        model_scope = swiss_config.resolve_model_config_scope(
+            project_name=active_project_name or selected_project_name,
+            agent_profile=active_agent_profile,
+        )
+
+        return {
+            "ok": True,
+            "active_context": (
+                {
+                    "context_id": context.id,
+                    "context_name": str(context.name or context.id),
+                    "project_name": active_project_name,
+                    "agent_profile": active_agent_profile,
+                }
+                if context is not None
+                else None
+            ),
+            "config": plugin_scope["config"],
+            "scope": {
+                "applies_to": plugin_scope["applies_to"],
+                "loaded_from": plugin_scope["loaded_from"],
+                "legacy_absorbed": plugin_scope["legacy_absorbed"],
+            },
+            "model_snapshot": {
+                "config": model_scope["config"],
+                "loaded_from": model_scope["loaded_from"],
+                "writeback_to": model_scope["writeback_to"],
+            },
+        }
+
     def _get_state(self, input: dict) -> dict | Response:
         context = self._get_context(input)
         if context is None:
@@ -150,14 +177,30 @@ class SwissCheese(ApiHandler):
         if context is None:
             return Response(status=404, response="Context not found")
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
+        requested_kind = str(input.get("kind", input.get("target_kind", "all")) or "all")
         targets = discovery.list_targets(
             source_context=context,
             scope=plugin_config.get("cross_chat_scope", {}),
             project_only=bool(input.get("project_only", False)),
             include_persisted=bool(input.get("include_persisted", True)),
-            kind=str(input.get("kind", input.get("target_kind", "all")) or "all"),
+            kind=requested_kind,
         )
-        return {"ok": True, "targets": targets}
+        all_targets = discovery.list_targets(
+            source_context=context,
+            scope=plugin_config.get("cross_chat_scope", {}),
+            project_only=bool(input.get("project_only", False)),
+            include_persisted=bool(input.get("include_persisted", True)),
+            kind="all",
+        )
+        return {
+            "ok": True,
+            "targets": targets,
+            "counts": {
+                "all": len(all_targets),
+                "chat": sum(1 for target in all_targets if target.get("kind") == "chat"),
+                "task": sum(1 for target in all_targets if target.get("kind") == "task"),
+            },
+        }
 
     def _inspect_target(self, input: dict) -> dict | Response:
         context = self._get_context(input)
@@ -183,22 +226,40 @@ class SwissCheese(ApiHandler):
             return Response(status=400, response="slot must be chat_model or utility_model")
 
         project_name = str(input.get("project_name", "") or "")
-        agent_profile = str(input.get("agent_profile", "") or "")
+        context = self._get_context(input)
+        active_project_name = project_state.get_project_name(context) if context is not None else project_name
+        active_agent_profile = str((context.agent0.config.profile if context is not None else input.get("agent_profile", "")) or "")
         provider = str(input.get("provider", "") or "")
         name = str(input.get("name", "") or "")
         raw_ctx_length = input.get("ctx_length", None)
         update_model_config = bool(input.get("update_model_config", True))
 
-        swiss_plugin_config = swiss_config.get_plugin_config(
-            agent=None,
+        swiss_scope = swiss_config.resolve_plugin_config_scope(
             project_name=project_name,
-            agent_profile=agent_profile,
+            agent_profile=active_agent_profile,
         )
-        model_config = swiss_config.get_model_config(
-            agent=None,
-            project_name=project_name,
-            agent_profile=agent_profile,
+        model_project_name = str(input.get("model_project_name", "") or "")
+        model_agent_profile = str(input.get("model_agent_profile", "") or "")
+        model_scope = (
+            {
+                "writeback_to": {
+                    "project_name": model_project_name,
+                    "agent_profile": model_agent_profile,
+                },
+                "config": swiss_config.get_model_config(
+                    agent=None,
+                    project_name=model_project_name,
+                    agent_profile=model_agent_profile,
+                ),
+            }
+            if model_project_name or model_agent_profile
+            else swiss_config.resolve_model_config_scope(
+                project_name=active_project_name,
+                agent_profile=active_agent_profile,
+            )
         )
+        swiss_plugin_config = dict(swiss_scope["config"])
+        model_config = dict(model_scope["config"])
         section = dict(model_config.get(slot, {}) or {})
         if provider:
             section["provider"] = provider
@@ -211,7 +272,12 @@ class SwissCheese(ApiHandler):
                 return Response(status=400, response="ctx_length must be an integer")
         if update_model_config:
             model_config[slot] = section
-            swiss_config.save_model_config(project_name, agent_profile, model_config)
+            writeback = model_scope.get("writeback_to", {})
+            swiss_config.save_model_config(
+                str(writeback.get("project_name", "") or ""),
+                str(writeback.get("agent_profile", "") or ""),
+                model_config,
+            )
 
         tuple_data = context_window.build_model_tuple(slot, section)
         if not tuple_data["provider"] or not tuple_data["name"] or int(tuple_data["ctx_length"] or 0) <= 0:
@@ -219,14 +285,20 @@ class SwissCheese(ApiHandler):
 
         tuple_data["confirmed_at"] = iso_now()
         swiss_config.append_confirmed_tuple(swiss_plugin_config, slot, tuple_data)
-        swiss_config.save_plugin_config(project_name, agent_profile, swiss_plugin_config)
-        self._sync_live_scope_contexts(project_name, agent_profile)
+        apply_scope = swiss_scope.get("applies_to", {})
+        swiss_config.save_plugin_config(
+            str(apply_scope.get("project_name", "") or ""),
+            str(apply_scope.get("agent_profile", "") or ""),
+            swiss_plugin_config,
+        )
+        self._sync_live_scope_contexts(str(apply_scope.get("project_name", "") or ""))
 
         return {
             "ok": True,
             "confirmed_tuple": tuple_data,
-            "project_name": project_name,
-            "agent_profile": agent_profile,
+            "project_name": str(apply_scope.get("project_name", "") or ""),
+            "agent_profile": active_agent_profile,
+            "model_writeback_to": model_scope.get("writeback_to", {}),
         }
 
     def _todo_add(self, input: dict) -> dict | Response:
@@ -338,9 +410,46 @@ class SwissCheese(ApiHandler):
         )
         target = inspection.get("target") or {}
         if not target:
-            return Response(status=404, response="Target not found")
+            blocked = state_helper.record_blocked_followup(
+                context,
+                target_key=requested_target_key,
+                target_context_id=requested_target_context_id,
+                target_name=selector or requested_target_key or requested_target_context_id,
+                target_kind="chat",
+                reason=reason,
+                message=message,
+                blocked_reason="target_not_found",
+                auto_send=bool(input.get("auto_send", False)),
+                source="api",
+                plugin_config=plugin_config,
+            )
+            return {
+                "ok": False,
+                "queued": False,
+                "result": blocked,
+                "inspection": inspection,
+            }
         if not inspection.get("permissions", {}).get("can_queue", False):
-            return Response(status=403, response="Target is not queueable in the current scope")
+            blocked = state_helper.record_blocked_followup(
+                context,
+                target_key=str(target.get("target_key", "") or requested_target_key),
+                target_context_id=str(target.get("context_id", "") or requested_target_context_id),
+                target_kind=str(target.get("kind", "chat") or "chat"),
+                target_task_uuid=str(((target.get("scheduler") or {}) if isinstance(target.get("scheduler"), dict) else {}).get("uuid", "") or ""),
+                target_name=str(target.get("name", "") or selector or requested_target_key or requested_target_context_id),
+                reason=reason,
+                message=message,
+                blocked_reason="target_not_queueable_in_scope",
+                auto_send=bool(input.get("auto_send", False)),
+                source="api",
+                plugin_config=plugin_config,
+            )
+            return {
+                "ok": False,
+                "queued": False,
+                "result": blocked,
+                "inspection": inspection,
+            }
 
         queued, payload = state_helper.queue_followup(
             context,
@@ -379,6 +488,17 @@ class SwissCheese(ApiHandler):
         plugin_config = swiss_config.get_plugin_config(context.get_agent())
         removed = state_helper.remove_followup(context, fingerprint, plugin_config=plugin_config)
         return {"ok": removed}
+
+    def _retry_followup(self, input: dict) -> dict | Response:
+        context = self._get_context(input)
+        if context is None:
+            return Response(status=404, response="Context not found")
+        fingerprint = str(input.get("fingerprint", "") or "")
+        if not fingerprint:
+            return Response(status=400, response="fingerprint is required")
+        plugin_config = swiss_config.get_plugin_config(context.get_agent())
+        queued, result = state_helper.retry_followup(context, fingerprint, plugin_config=plugin_config)
+        return {"ok": queued, "queued": queued, "result": result}
 
     def _bridge_followup(self, input: dict) -> dict | Response:
         context = self._get_context(input)

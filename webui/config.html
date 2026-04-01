@@ -3,33 +3,45 @@
   <title>SwissCheese</title>
   <script type="module">
     import * as api from "/js/api.js";
+    import { getContext } from "/index.js";
+    import { store as chatsStore } from "/components/sidebar/chats/chats-store.js";
     import {
       toastFrontendError,
       toastFrontendSuccess,
       toastFrontendInfo,
     } from "/components/notifications/notification-store.js";
 
+    const ENDPOINT = "/plugins/swiss_cheese/swiss_cheese";
+
+    const MODEL_SCOPE_LABELS = {
+      global: "Global model config",
+      project: "Project model config",
+      agent: "Agent profile model config",
+      project_agent: "Project + profile model config",
+      default: "Bundled model defaults",
+    };
+
+    function deepClone(value) {
+      return JSON.parse(JSON.stringify(value || {}));
+    }
+
+    function replaceConfig(target, nextValue) {
+      Object.keys(target || {}).forEach((key) => {
+        delete target[key];
+      });
+      Object.assign(target || {}, deepClone(nextValue));
+    }
+
     window.createSwissCheeseConfigModel = (context, config) => ({
+      scopeInfo: null,
       modelSnapshot: null,
+      activeContext: null,
       loadingSnapshot: false,
       chatConfirmValue: "",
       utilityConfirmValue: "",
 
-      async loadScopeSnapshot() {
-        this.loadingSnapshot = true;
-        try {
-          const response = await api.callJsonApi("/plugins/_model_config/model_config_get", {
-            project_name: context.projectName || "",
-            agent_profile: context.agentProfileKey || "",
-          });
-          this.modelSnapshot = response || null;
-          this.chatConfirmValue = String(response?.config?.chat_model?.ctx_length || "");
-          this.utilityConfirmValue = String(response?.config?.utility_model?.ctx_length || "");
-        } catch (error) {
-          void toastFrontendError(error?.message || "Failed to load model snapshot", "SwissCheese");
-        } finally {
-          this.loadingSnapshot = false;
-        }
+      currentContextId() {
+        return chatsStore.selected || getContext() || "";
       },
 
       initDefaults() {
@@ -48,11 +60,82 @@
         }
       },
 
+      applyResolvedConfig(resolvedConfig) {
+        replaceConfig(config, resolvedConfig || {});
+        this.initDefaults();
+      },
+
+      formatProject(projectName) {
+        return projectName ? context.projectLabel(projectName) : "Global";
+      },
+
+      formatSwissSource(source) {
+        if (!source) return "Bundled defaults";
+        if (source.scope === "default") return "Bundled defaults";
+        const base = source.scope === "project"
+          ? `Project ${this.formatProject(source.project_name)}`
+          : "Global";
+        return source.legacy_profile
+          ? `${base} via legacy profile ${source.agent_profile || "unknown"}`
+          : base;
+      },
+
+      formatSwissTarget(target) {
+        if (!target) return "Global";
+        return target.scope === "project"
+          ? `Project ${this.formatProject(target.project_name)}`
+          : "Global";
+      },
+
+      formatModelSource(source) {
+        if (!source) return "Bundled model defaults";
+        const label = MODEL_SCOPE_LABELS[source.scope] || "Model config";
+        if (source.scope === "project_agent") {
+          return `${label} for ${this.formatProject(source.project_name)} / ${source.agent_profile || "profile"}`;
+        }
+        if (source.scope === "project") {
+          return `${label} for ${this.formatProject(source.project_name)}`;
+        }
+        if (source.scope === "agent") {
+          return `${label} for ${source.agent_profile || "profile"}`;
+        }
+        return label;
+      },
+
+      contextSummary() {
+        if (!this.activeContext) return "No active chat selected";
+        const parts = [this.activeContext.context_name || this.activeContext.context_id];
+        if (this.activeContext.project_name) parts.push(this.formatProject(this.activeContext.project_name));
+        if (this.activeContext.agent_profile) parts.push(this.activeContext.agent_profile);
+        return parts.join(" | ");
+      },
+
       searchQueryFor(slot) {
         const model = this.modelSnapshot?.config?.[slot] || {};
         const provider = model.provider || "";
         const name = model.name || "";
         return `"${[provider, name, "context window tokens"].filter(Boolean).join(" ")}"`;
+      },
+
+      async loadScopeSnapshot() {
+        this.loadingSnapshot = true;
+        try {
+          const response = await api.callJsonApi(ENDPOINT, {
+            action: "get_config_context",
+            context_id: this.currentContextId(),
+            project_name: context.projectName || "",
+          });
+          this.scopeInfo = response?.scope || null;
+          this.modelSnapshot = response?.model_snapshot || null;
+          this.activeContext = response?.active_context || null;
+          this.applyResolvedConfig(response?.config || {});
+          this.chatConfirmValue = String(response?.model_snapshot?.config?.chat_model?.ctx_length || "");
+          this.utilityConfirmValue = String(response?.model_snapshot?.config?.utility_model?.ctx_length || "");
+        } catch (error) {
+          void toastFrontendError(error?.message || "Failed to load SwissCheese scope context", "SwissCheese");
+        } finally {
+          this.loadingSnapshot = false;
+        }
       },
 
       async confirmSlot(slot) {
@@ -65,15 +148,17 @@
         }
 
         try {
-          await api.callJsonApi("/plugins/swiss_cheese/swiss_cheese", {
+          await api.callJsonApi(ENDPOINT, {
             action: "confirm_ctx_window",
+            context_id: this.currentContextId(),
             project_name: context.projectName || "",
-            agent_profile: context.agentProfileKey || "",
             slot,
             provider: snapshot.provider,
             name: snapshot.name,
             ctx_length: ctxLength,
             update_model_config: true,
+            model_project_name: this.modelSnapshot?.writeback_to?.project_name || "",
+            model_agent_profile: this.modelSnapshot?.writeback_to?.agent_profile || "",
           });
           await this.loadScopeSnapshot();
           void toastFrontendSuccess(`Confirmed ${slot.replace("_", " ")}`, "SwissCheese");
@@ -91,7 +176,7 @@
       initDefaults();
       await loadScopeSnapshot();
       $watch('context.projectName', async () => { await loadScopeSnapshot(); });
-      $watch('context.agentProfileKey', async () => { await loadScopeSnapshot(); });
+      $watch('context.loadedPath', async () => { await loadScopeSnapshot(); });
     "
   >
     <template x-if="config">
@@ -99,6 +184,23 @@
         <div class="section-title">SwissCheese</div>
         <div class="section-description">
           SwissCheese is the resilience harness for the active conversation. It tracks holes, context-window confidence, bounded recovery, and same-project orchestration scope.
+        </div>
+
+        <div class="swiss-scope-panel">
+          <div class="swiss-scope-grid">
+            <div class="swiss-scope-chip">
+              <span>Applies to</span>
+              <strong x-text="formatSwissTarget(scopeInfo?.applies_to)"></strong>
+            </div>
+            <div class="swiss-scope-chip">
+              <span>Loaded from</span>
+              <strong x-text="formatSwissSource(scopeInfo?.loaded_from)"></strong>
+            </div>
+          </div>
+          <div class="swiss-scope-path" x-show="scopeInfo?.loaded_from?.path" x-text="scopeInfo?.loaded_from?.path || ''"></div>
+          <div class="swiss-scope-note" x-show="scopeInfo?.legacy_absorbed">
+            Legacy profile-scoped SwissCheese settings will be absorbed into this surviving scope on save or confirmation.
+          </div>
         </div>
 
         <div class="field">
@@ -189,6 +291,20 @@
           SwissCheese autonomy is gated until the active chat-model context length has been explicitly confirmed for this scope. Confirmations are stored as scoped `(provider, model, ctx_length)` tuples.
         </div>
 
+        <div class="swiss-scope-panel swiss-scope-panel-compact">
+          <div class="swiss-scope-grid">
+            <div class="swiss-scope-chip">
+              <span>Active snapshot</span>
+              <strong x-text="contextSummary()"></strong>
+            </div>
+            <div class="swiss-scope-chip">
+              <span>Model loaded from</span>
+              <strong x-text="formatModelSource(modelSnapshot?.loaded_from)"></strong>
+            </div>
+          </div>
+          <div class="swiss-scope-path" x-show="modelSnapshot?.loaded_from?.path" x-text="modelSnapshot?.loaded_from?.path || ''"></div>
+        </div>
+
         <div class="swiss-config-loading" x-show="loadingSnapshot">
           <span class="material-symbols-outlined spinning">progress_activity</span>
           <span>Loading active model snapshot...</span>
@@ -231,6 +347,46 @@
       flex-direction: column;
       gap: 0.9rem;
     }
+    .swiss-scope-panel {
+      border: 1px solid var(--color-border);
+      border-radius: 8px;
+      padding: 0.85rem 0.95rem;
+      background:
+        linear-gradient(
+          135deg,
+          color-mix(in srgb, var(--color-primary) 7%, var(--color-panel)) 0%,
+          var(--color-panel) 100%
+        );
+      display: grid;
+      gap: 0.5rem;
+    }
+    .swiss-scope-panel-compact {
+      background: var(--color-panel);
+    }
+    .swiss-scope-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.6rem;
+    }
+    .swiss-scope-chip {
+      display: grid;
+      gap: 0.2rem;
+      min-width: 0;
+    }
+    .swiss-scope-chip span {
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--color-text-secondary);
+    }
+    .swiss-scope-chip strong,
+    .swiss-scope-path {
+      word-break: break-word;
+    }
+    .swiss-scope-note {
+      color: var(--color-text-secondary);
+      font-size: 0.88rem;
+    }
     .swiss-config-loading {
       display: flex;
       align-items: center;
@@ -272,6 +428,7 @@
       to { transform: rotate(360deg); }
     }
     @media (max-width: 820px) {
+      .swiss-scope-grid,
       .swiss-questionnaire {
         grid-template-columns: 1fr;
       }

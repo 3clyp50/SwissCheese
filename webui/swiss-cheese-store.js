@@ -12,12 +12,56 @@ import {
 const TITLE = "SwissCheese";
 const ENDPOINT = "/plugins/swiss_cheese/swiss_cheese";
 const BARRIER_META = {
-  Prepare: "Setup, prerequisites, and readiness.",
-  Aviate: "Keep the current turn stable and under control.",
-  Navigate: "Direction, decisions, and next-step clarity.",
-  Communicate: "Messages, handoffs, and queued followups.",
-  Learn: "Lessons, patterns, and prevention for next time.",
+  Readiness: "Setup, prerequisites, and operating readiness.",
+  Stability: "Execution stability and control in the current turn.",
+  Direction: "Direction, decision quality, and next-step clarity.",
+  Coordination: "Handoffs, followups, and cross-context alignment.",
+  Learning: "Retained lessons, patterns, and prevention work.",
 };
+const LEGACY_BARRIERS = {
+  Prepare: "Readiness",
+  Aviate: "Stability",
+  Navigate: "Direction",
+  Communicate: "Coordination",
+  Learn: "Learning",
+  Readiness: "Readiness",
+  Stability: "Stability",
+  Direction: "Direction",
+  Coordination: "Coordination",
+  Learning: "Learning",
+};
+const SEVERITY_RANK = {
+  low: 0,
+  medium: 1,
+  high: 2,
+  critical: 3,
+};
+const CHAT_MAP_POSITIONS = [
+  { x: 50, y: 7 },
+  { x: 84, y: 28 },
+  { x: 78, y: 72 },
+  { x: 22, y: 72 },
+  { x: 16, y: 28 },
+];
+
+function normalizeBarrier(barrier) {
+  return LEGACY_BARRIERS[barrier] || "Direction";
+}
+
+function barrierList() {
+  return ["Readiness", "Stability", "Direction", "Coordination", "Learning"];
+}
+
+function severityRank(severity) {
+  return SEVERITY_RANK[String(severity || "low").toLowerCase()] ?? 0;
+}
+
+function maxSeverity(items) {
+  const winner = (items || []).reduce((best, item) =>
+    severityRank(item?.severity) > severityRank(best) ? String(item?.severity || "low").toLowerCase() : best,
+  "low");
+  return items?.length ? winner : "";
+}
 
 function targetLabel(target, { includeQueueability = false } = {}) {
   if (!target) return "Current target";
@@ -40,9 +84,14 @@ function followupEntries(chatState) {
   const pending = (swiss.followup_queue || []).map((item) => ({ ...item, entry_source: "pending" }));
   const history = (swiss.followup_history || []).map((item) => ({ ...item, entry_source: "history" }));
   return [...pending, ...history].sort((left, right) =>
-    String(right.created_at || right.bridged_at || right.sent_at || "").localeCompare(
-      String(left.created_at || left.bridged_at || left.sent_at || ""),
+    String(right.sent_at || right.blocked_at || right.bridged_at || right.created_at || "").localeCompare(
+      String(left.sent_at || left.blocked_at || left.bridged_at || left.created_at || ""),
     ));
+}
+
+function summarizeSeverity(items) {
+  const severity = maxSeverity(items);
+  return severity ? severity.toUpperCase() : "CLEAR";
 }
 
 export const store = createStore("swissCheese", {
@@ -57,17 +106,15 @@ export const store = createStore("swissCheese", {
   availableViews: ["chat"],
   activeView: "chat",
   targetCatalog: [],
+  targetCatalogCounts: { all: 0, chat: 0, task: 0 },
   targetKindFilter: "all",
   projectOnly: true,
   includePersisted: true,
   inspection: null,
   inspectionTargetKey: "",
-  followup: {
-    target_key: "",
-    reason: "",
-    message: "",
-    auto_send: false,
-  },
+  projectMapTargetKey: "",
+  selectedBarrierKey: "",
+  previewBarrierKey: "",
 
   async openModal() {
     await openModal("/plugins/swiss_cheese/webui/main.html");
@@ -83,74 +130,177 @@ export const store = createStore("swissCheese", {
     return Array.isArray(this.availableViews) && this.availableViews.includes("project");
   },
 
+  get isChatView() {
+    return this.activeView === "chat";
+  },
+
+  get isProjectView() {
+    return this.activeView === "project";
+  },
+
+  get hasTaskTargets() {
+    return (this.targetCatalogCounts?.task || 0) > 0;
+  },
+
   get barrierCards() {
-    const holes = this.chatState?.holes || [];
-    return ["Prepare", "Aviate", "Navigate", "Communicate", "Learn"].map((barrier) => ({
-      barrier,
-      description: BARRIER_META[barrier] || "",
-      holes: holes.filter((hole) => hole.barrier === barrier),
+    const holes = (this.chatState?.holes || []).map((hole) => ({
+      ...hole,
+      barrier: normalizeBarrier(hole?.barrier),
+      severity: String(hole?.severity || "low").toLowerCase(),
     }));
+    return barrierList().map((barrier) => {
+      const items = holes.filter((hole) => hole.barrier === barrier);
+      return {
+        barrier,
+        description: BARRIER_META[barrier] || "",
+        holes: items,
+        issueCount: items.length,
+        severity: maxSeverity(items),
+      };
+    });
+  },
+
+  get issues() {
+    return [...(this.chatState?.holes || [])]
+      .map((hole) => ({
+        ...hole,
+        barrier: normalizeBarrier(hole?.barrier),
+        severity: String(hole?.severity || "low").toLowerCase(),
+      }))
+      .sort((left, right) => severityRank(right.severity) - severityRank(left.severity));
+  },
+
+  get activeBarrierCard() {
+    const key = this.previewBarrierKey || this.selectedBarrierKey;
+    if (key) return this.barrierCards.find((card) => card.barrier === key) || null;
+    return this.barrierCards.find((card) => card.issueCount > 0) || this.barrierCards[0] || null;
+  },
+
+  get chatMapNodes() {
+    return this.barrierCards.map((card, index) => {
+      const position = CHAT_MAP_POSITIONS[index] || { x: 50, y: 50 };
+      return {
+        ...card,
+        x: position.x,
+        y: position.y,
+        badge: card.issueCount,
+        severityLabel: summarizeSeverity(card.holes),
+        style: `left:${position.x}%; top:${position.y}%;`,
+      };
+    });
+  },
+
+  get chatCenterLabel() {
+    return this.currentTarget?.name || this.chatState?.context_name || "Active chat";
   },
 
   get filteredTargets() {
-    if (this.targetKindFilter === "all") return this.targetCatalog || [];
-    return (this.targetCatalog || []).filter((target) => target.kind === this.targetKindFilter);
-  },
-
-  get queueTargets() {
-    return this.filteredTargets.filter((target) => target?.permissions?.can_queue);
+    return this.targetCatalog || [];
   },
 
   get inspectableTargets() {
     return this.filteredTargets;
   },
 
-  get projectChatSummaries() {
-    return this.projectRollup?.chat_summaries || [];
+  get actionableTargets() {
+    return this.filteredTargets.filter((target) => target?.permissions?.can_queue);
   },
 
-  get projectTotals() {
-    return this.projectRollup?.totals || {};
+  get readOnlyTargets() {
+    return this.filteredTargets.filter((target) => !target?.permissions?.can_queue);
   },
 
   get followupEntries() {
     return followupEntries(this.chatState);
   },
 
-  get selectedFollowupTarget() {
-    return (this.targetCatalog || []).find((target) => target.target_key === this.followup.target_key) || null;
+  get projectTargets() {
+    return this.filteredTargets;
+  },
+
+  get selectedProjectTarget() {
+    return this.projectTargets.find((target) => target.target_key === (this.projectMapTargetKey || this.inspectionTargetKey)) || null;
+  },
+
+  get projectGraphNodes() {
+    const targets = this.projectTargets || [];
+    const count = Math.max(targets.length, 1);
+    return targets.map((target, index) => {
+      const angle = ((Math.PI * 2) / count) * index - (Math.PI / 2);
+      const radius = count <= 4 ? 30 : 36;
+      const x = 50 + (Math.cos(angle) * radius);
+      const y = 50 + (Math.sin(angle) * radius);
+      const severity = deriveTargetSeverity(target);
+      return {
+        ...target,
+        x,
+        y,
+        issueCount: intValue(target?.state_excerpt?.hole_count),
+        todoCount: intValue(target?.state_excerpt?.open_todo_count),
+        nearMissCount: intValue(target?.state_excerpt?.near_miss_count),
+        followupCount: intValue(target?.state_excerpt?.queue_count || target?.state_excerpt?.followup_queue_count),
+        severity,
+        severityLabel: summarizeSeverity([{ severity }].filter((item) => item.severity)),
+      };
+    });
   },
 
   targetLabel(target, options = {}) {
     return targetLabel(target, options);
   },
 
-  setActiveView(view) {
-    if (!view || !this.availableViews.includes(view)) return;
-    this.activeView = view;
+  targetSeverity(target) {
+    return deriveTargetSeverity(target);
   },
 
-  setTargetKindFilter(kind) {
+  setBarrierSelection(barrier) {
+    this.selectedBarrierKey = barrier || "";
+  },
+
+  previewBarrier(barrier) {
+    this.previewBarrierKey = barrier || "";
+  },
+
+  clearBarrierPreview() {
+    this.previewBarrierKey = "";
+  },
+
+  async setActiveView(view) {
+    if (!view || !this.availableViews.includes(view)) return;
+    this.activeView = view;
+    if (this.isChatView && this.targetKindFilter !== "all") {
+      this.targetKindFilter = "all";
+      await this.updateCatalogFilters();
+      return;
+    }
+    if (this.isProjectView) {
+      await this.updateCatalogFilters();
+    }
+  },
+
+  targetFilterDisabled(kind) {
+    if (this.isChatView) return true;
+    if (kind === "task") return !this.hasTaskTargets;
+    return false;
+  },
+
+  async setTargetKindFilter(kind) {
+    if (this.targetFilterDisabled(kind)) return;
     this.targetKindFilter = kind || "all";
-    this.ensureSelections();
+    await this.updateCatalogFilters();
   },
 
   ensureSelections() {
     const inspectableKeys = new Set((this.targetCatalog || []).map((target) => target.target_key));
-    const queueableKeys = new Set(
-      (this.targetCatalog || []).filter((target) => target?.permissions?.can_queue).map((target) => target.target_key),
-    );
-    const fallbackTargetKey = this.currentTarget?.target_key || "";
+    const fallbackTargetKey = this.currentTarget?.target_key || [...inspectableKeys][0] || "";
 
-    if (!queueableKeys.has(this.followup.target_key)) {
-      this.followup.target_key = queueableKeys.has(fallbackTargetKey)
-        ? fallbackTargetKey
-        : [...queueableKeys][0] || fallbackTargetKey;
-    }
     if (!inspectableKeys.has(this.inspectionTargetKey)) {
       this.inspectionTargetKey = inspectableKeys.has(fallbackTargetKey)
         ? fallbackTargetKey
-        : [...inspectableKeys][0] || fallbackTargetKey;
+        : [...inspectableKeys][0] || "";
+    }
+    if (!inspectableKeys.has(this.projectMapTargetKey)) {
+      this.projectMapTargetKey = this.inspectionTargetKey || fallbackTargetKey;
     }
   },
 
@@ -163,6 +313,7 @@ export const store = createStore("swissCheese", {
       this.projectRollup = null;
       this.contextWindow = null;
       this.targetCatalog = [];
+      this.targetCatalogCounts = { all: 0, chat: 0, task: 0 };
       this.inspection = null;
       this.currentTarget = null;
       return;
@@ -195,6 +346,11 @@ export const store = createStore("swissCheese", {
         this.includePersisted = !!response?.catalog_defaults?.include_persisted;
         this.targetKindFilter = response?.catalog_defaults?.kind || "all";
       }
+
+      if (!this.selectedBarrierKey) {
+        this.selectedBarrierKey = (this.barrierCards.find((card) => card.issueCount > 0) || this.barrierCards[0] || {}).barrier || "";
+      }
+
       await this.refreshCatalog();
       await this.inspectTarget();
     } catch (error) {
@@ -212,8 +368,15 @@ export const store = createStore("swissCheese", {
         context_id: this.contextId,
         project_only: !!this.projectOnly,
         include_persisted: !!this.includePersisted,
+        kind: this.targetKindFilter,
       });
       this.targetCatalog = response?.targets || [];
+      this.targetCatalogCounts = response?.counts || { all: this.targetCatalog.length, chat: 0, task: 0 };
+      if (this.isProjectView && this.targetKindFilter === "task" && !this.hasTaskTargets) {
+        this.targetKindFilter = "all";
+        await this.refreshCatalog();
+        return;
+      }
       this.ensureSelections();
     } catch (error) {
       void toastFrontendError(error?.message || "Failed to load targets", TITLE);
@@ -226,7 +389,7 @@ export const store = createStore("swissCheese", {
   },
 
   async inspectTarget() {
-    if (!this.contextId) return;
+    if (!this.contextId || !this.inspectionTargetKey) return;
     try {
       const response = await api.callJsonApi(ENDPOINT, {
         action: "inspect_target",
@@ -234,11 +397,18 @@ export const store = createStore("swissCheese", {
         target_key: this.inspectionTargetKey || "",
         project_only: !!this.projectOnly,
         include_persisted: !!this.includePersisted,
+        kind: this.targetKindFilter,
       });
       this.inspection = response?.inspection || null;
     } catch (error) {
       void toastFrontendError(error?.message || "Failed to inspect target", TITLE);
     }
+  },
+
+  async selectProjectTarget(targetKey) {
+    this.projectMapTargetKey = targetKey || "";
+    this.inspectionTargetKey = targetKey || "";
+    await this.inspectTarget();
   },
 
   async resolveTodo(todoId, scope = "chat") {
@@ -271,35 +441,22 @@ export const store = createStore("swissCheese", {
     }
   },
 
-  async queueFollowup() {
+  async retryFollowup(fingerprint) {
     if (!this.contextId) return;
-    if (!this.followup.reason.trim() || !this.followup.message.trim()) {
-      void toastFrontendInfo("Reason and message are required for a followup.", TITLE);
-      return;
-    }
     try {
       const response = await api.callJsonApi(ENDPOINT, {
-        action: "queue_followup",
+        action: "retry_followup",
         context_id: this.contextId,
-        target_key: this.followup.target_key || this.currentTarget?.target_key || "",
-        reason: this.followup.reason,
-        message: this.followup.message,
-        auto_send: !!this.followup.auto_send,
+        fingerprint,
       });
-      if (!response?.ok && !response?.queued) {
-        void toastFrontendInfo(response?.result?.reason || "SwissCheese rejected the followup.", TITLE);
-      } else {
-        void toastFrontendSuccess("Followup queued", TITLE);
-        this.followup = {
-          target_key: this.currentTarget?.target_key || "",
-          reason: "",
-          message: "",
-          auto_send: false,
-        };
-        await this.refresh();
+      if (!response?.queued) {
+        void toastFrontendInfo(response?.result?.reason || "Followup could not be retried.", TITLE);
+        return;
       }
+      await this.refresh();
+      void toastFrontendSuccess("Followup retried", TITLE);
     } catch (error) {
-      void toastFrontendError(error?.message || "Failed to queue followup", TITLE);
+      void toastFrontendError(error?.message || "Failed to retry followup", TITLE);
     }
   },
 
@@ -342,3 +499,15 @@ export const store = createStore("swissCheese", {
     }
   },
 });
+
+function intValue(value) {
+  return Number.parseInt(value || "0", 10) || 0;
+}
+
+function deriveTargetSeverity(target) {
+  const holes = intValue(target?.state_excerpt?.hole_count);
+  const nearMisses = intValue(target?.state_excerpt?.near_miss_count);
+  if (holes > 0) return "high";
+  if (nearMisses > 0) return "medium";
+  return "";
+}

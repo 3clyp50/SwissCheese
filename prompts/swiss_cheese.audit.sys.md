@@ -15,7 +15,7 @@ Required JSON shape:
     {
       "kind": "active_failure|latent_condition",
       "pattern": "sycophancy|low_energy_effort|gaming_fake_progress|skipped_verification|unsafe_tool_use|premature_done|wrong_ctx_limit|excessive_context_occupancy|missing_success_criteria|stale_assumptions|project_mismatch|disabled_orchestration_scope|chat_ctx_unconfirmed|utility_ctx_unconfirmed",
-      "barrier": "Prepare|Aviate|Navigate|Communicate|Learn",
+      "barrier": "Readiness|Stability|Direction|Coordination|Learning",
       "severity": "low|medium|high|critical",
       "confidence": 0.0,
       "title": "short label",
@@ -39,7 +39,7 @@ Required JSON shape:
     {
       "title": "short label",
       "detail": "what was trapped in time",
-      "barrier": "Prepare|Aviate|Navigate|Communicate|Learn",
+      "barrier": "Readiness|Stability|Direction|Coordination|Learning",
       "severity": "low|medium|high|critical",
       "confidence": 0.0
     }

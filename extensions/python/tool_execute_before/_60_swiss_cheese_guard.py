@@ -19,7 +19,7 @@ class SwissCheeseGuard(Extension):
             {
                 "title": "Autonomous followup blocked",
                 "detail": f"SwissCheese blocked tool '{tool_name}' because {reason}.",
-                "barrier": "Communicate",
+                "barrier": "Coordination",
                 "severity": "medium",
                 "confidence": 1.0,
                 "fingerprint": str((self.agent.context.get_data("_swiss_cheese_autonomy_origin") or {}).get("fingerprint", "")),

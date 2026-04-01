@@ -11,7 +11,7 @@ def _format_holes(holes: list[dict]) -> str:
     lines = []
     for hole in holes[:4]:
         lines.append(
-            f"- [{hole.get('barrier', 'Navigate')}] {hole.get('pattern', 'unknown')} ({hole.get('severity', 'medium')})"
+            f"- [{hole.get('barrier', 'Direction')}] {hole.get('pattern', 'unknown')} ({hole.get('severity', 'medium')})"
         )
     return "\n".join(lines)
 

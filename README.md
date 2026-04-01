@@ -1,12 +1,12 @@
 # SwissCheese
 
-SwissCheese is a conversation-level resilience harness for Agent Zero inspired by aviation mental models. It treats AI failures as system-plus-process problems and keeps `Aviate, Navigate, Communicate` inside a fuller barrier stack:
+SwissCheese is a conversation-level resilience harness for Agent Zero. It treats AI failures as system-plus-process problems and organizes defenses around five operating barriers:
 
-1. `Prepare`
-2. `Aviate`
-3. `Navigate`
-4. `Communicate`
-5. `Learn`
+1. `Readiness`
+2. `Stability`
+3. `Direction`
+4. `Coordination`
+5. `Learning`
 
 ## Why This Exists
 
@@ -60,6 +60,13 @@ SwissCheese never relies on the metaphor being intuitive. The README, system pro
 - utility-model confirmation is tracked too, but missing confirmation only downgrades confidence
 - if a configured context length exceeds `128000`, SwissCheese shows a best-practice advisory that the normal working envelope should stay at or below `100000` tokens unless the user deliberately overrides that guidance
 - each confirmation stores a `(provider, model, ctx_length)` tuple in scoped plugin config, then live chats in that scope mirror the resolved confirmation into `ctx_confirmation`
+
+## Config Scope
+
+- SwissCheese settings resolve only at `global` or `project` scope
+- global changes refresh all live chats
+- project changes refresh all live chats in that project
+- legacy profile-scoped SwissCheese configs are absorbed into the surviving global or project scope when the user saves or confirms context
 
 ## Cross-Chat Scope
 

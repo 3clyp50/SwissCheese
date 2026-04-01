@@ -24,6 +24,7 @@ from usr.plugins.swiss_cheese.helpers.constants import (
     TRANSIENT_LAST_UTILITY_INPUT_KEY,
     TRANSIENT_REASONING_KEY,
     TRANSIENT_RESPONSE_KEY,
+    normalize_barrier,
 )
 
 if TYPE_CHECKING:
@@ -147,8 +148,7 @@ def _safe_json_load(text: str) -> dict[str, Any] | None:
 
 
 def _normalize_barrier(value: Any) -> str:
-    candidate = str(value or "Navigate").strip().title()
-    return candidate if candidate in ("Prepare", "Aviate", "Navigate", "Communicate", "Learn") else "Navigate"
+    return normalize_barrier(value)
 
 
 def _normalize_kind(value: Any) -> str:
@@ -241,7 +241,7 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
             {
                 "kind": "latent_condition",
                 "pattern": "excessive_context_occupancy",
-                "barrier": "Prepare",
+                "barrier": "Readiness",
                 "severity": "high",
                 "confidence": 0.95,
                 "title": "Working envelope exceeded",
@@ -256,7 +256,7 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
             {
                 "kind": "latent_condition",
                 "pattern": "chat_ctx_unconfirmed",
-                "barrier": "Prepare",
+                "barrier": "Readiness",
                 "severity": "high",
                 "confidence": 1.0,
                 "title": "Chat context length is unconfirmed",
@@ -274,7 +274,7 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
             {
                 "kind": "active_failure",
                 "pattern": "premature_done",
-                "barrier": "Aviate",
+                "barrier": "Stability",
                 "severity": "medium",
                 "confidence": 0.8,
                 "title": "Premature completion language",
@@ -292,7 +292,7 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
             {
                 "kind": "active_failure",
                 "pattern": "skipped_verification",
-                "barrier": "Navigate",
+                "barrier": "Direction",
                 "severity": "medium",
                 "confidence": 0.85,
                 "title": "Verification likely skipped",
@@ -307,11 +307,11 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
         if str(auto_origin.get("fingerprint", "")) == str((agent.context.get_data("swiss_cheese_state") or {}).get("last_followup_fingerprint", "")):
             holes.append(
                 {
-                    "kind": "active_failure",
-                    "pattern": "gaming_fake_progress",
-                    "barrier": "Communicate",
-                    "severity": "medium",
-                    "confidence": 0.9,
+                "kind": "active_failure",
+                "pattern": "gaming_fake_progress",
+                "barrier": "Coordination",
+                "severity": "medium",
+                "confidence": 0.9,
                     "title": "Redundant autonomous followup loop",
                     "evidence": json.dumps(auto_origin, ensure_ascii=False),
                     "trajectory": "Repeating the same autonomous followup can create self-loops instead of progress.",
@@ -541,12 +541,27 @@ def _apply_audit_result(
         target_meta = inspection.get("target") or {}
         if not target_meta or not inspection.get("permissions", {}).get("can_queue", False):
             selector_label = target_key_raw or target_context_id_raw or target
+            blocked_reason = "target_not_found" if not target_meta else "target_not_queueable_in_scope"
+            state_helper.record_blocked_followup(
+                agent.context,
+                target_key=target_key_raw,
+                target_context_id=target_context_id_raw,
+                target_kind=str((target_meta or {}).get("kind", "chat") or "chat"),
+                target_task_uuid=str((((target_meta or {}).get("scheduler") or {}) if isinstance((target_meta or {}).get("scheduler"), dict) else {}).get("uuid", "") or ""),
+                target_name=str((target_meta or {}).get("name", "") or selector_label),
+                reason=reason,
+                message=message,
+                blocked_reason=blocked_reason,
+                auto_send=auto_send,
+                source="audit",
+                plugin_config=plugin_config,
+            )
             state_helper.record_near_miss(
                 agent.context,
                 {
                     "title": "Followup queue blocked",
                     "detail": f"SwissCheese rejected queued followup for target '{selector_label}'.",
-                    "barrier": "Communicate",
+                    "barrier": "Coordination",
                     "severity": "medium",
                     "confidence": 1.0,
                 },
@@ -572,7 +587,7 @@ def _apply_audit_result(
                 {
                     "title": "Followup deduplicated",
                     "detail": f"SwissCheese rejected followup '{reason}' because {info.get('reason', 'it was not allowed')}.",
-                    "barrier": "Communicate",
+                    "barrier": "Coordination",
                     "severity": "low",
                     "confidence": 1.0,
                     "fingerprint": info.get("fingerprint", ""),

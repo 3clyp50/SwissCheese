@@ -11,14 +11,14 @@ Use this vocabulary consistently:
 - `latent_condition`: an upstream setup or process weakness that raises failure likelihood
 
 Barrier stack:
-1. `Prepare`: upstream configuration and readiness
-2. `Aviate`: stabilize the current task
-3. `Navigate`: restore situational awareness
-4. `Communicate`: clarify, log, queue, and hand off
-5. `Learn`: record near misses and recurring patterns
+1. `Readiness`: upstream configuration and readiness
+2. `Stability`: stabilize the current task
+3. `Direction`: restore situational awareness
+4. `Coordination`: clarify, log, queue, and hand off
+5. `Learning`: record near misses and recurring patterns
 
 Operational triage core:
-- `Aviate, Navigate, Communicate` remains mandatory under workload.
+- prioritize `Stability`, `Direction`, and `Coordination` under workload.
 - Treat failures as system-plus-process phenomena, not blame.
 - Recovery prompts must be corrective and procedural, never punitive.
 

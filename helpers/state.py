@@ -23,6 +23,7 @@ from usr.plugins.swiss_cheese.helpers.constants import (
     STATE_KEYS,
     TODOS_KEY,
     TRANSIENT_AUTONOMY_ORIGIN_KEY,
+    normalize_barrier,
 )
 
 
@@ -154,6 +155,25 @@ def _normalize_followup_items(items: list[dict[str, Any]]) -> list[dict[str, Any
         if isinstance(item, dict):
             normalized.append(normalize_followup_record(item))
     return normalized
+
+
+def _normalize_hole_record(hole: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **dict(hole or {}),
+        "barrier": normalize_barrier((hole or {}).get("barrier")),
+        "severity": _sanitize_severity(str((hole or {}).get("severity", "medium"))),
+    }
+
+
+def _normalize_near_miss_record(near_miss: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **dict(near_miss or {}),
+        "barrier": normalize_barrier((near_miss or {}).get("barrier"), default="Coordination"),
+        "severity": _sanitize_severity(str((near_miss or {}).get("severity", "medium"))),
+        "confidence": float((near_miss or {}).get("confidence", 1.0) or 1.0),
+        "created_at": str((near_miss or {}).get("created_at", iso_now()) or iso_now()),
+        "fingerprint": str((near_miss or {}).get("fingerprint", "") or ""),
+    }
 
 
 def _upsert_followup_record(records: list[dict[str, Any]], record: dict[str, Any], *, limit: int) -> list[dict[str, Any]]:
@@ -380,8 +400,14 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
         if not isinstance(value, list):
             context.set_data(key, [])
             continue
+        if key == HOLES_KEY:
+            context.set_data(key, [_normalize_hole_record(item) for item in value if isinstance(item, dict)])
+            continue
         if key == TODOS_KEY:
             context.set_data(key, dedupe_todos(value))
+            continue
+        if key == NEAR_MISSES_KEY:
+            context.set_data(key, [_normalize_near_miss_record(item) for item in value if isinstance(item, dict)])
     if not isinstance(context.get_data(AUDIT_STATUS_KEY), dict):
         context.set_data(AUDIT_STATUS_KEY, _default_audit_status())
     if not isinstance(context.get_data(CTX_CONFIRMATION_KEY), dict):
@@ -392,6 +418,13 @@ def ensure_state(context: AgentContext, plugin_config: dict[str, Any] | None = N
     raw_state = context.get_data(CHAT_STATE_KEY) or _default_state()
     state = _default_state()
     state.update(raw_state)
+    state["holes"] = [_normalize_hole_record(item) for item in list(raw_state.get("holes", []) or []) if isinstance(item, dict)]
+    state["todos"] = dedupe_todos(list(raw_state.get("todos", []) or []))
+    state["near_misses"] = [
+        _normalize_near_miss_record(item)
+        for item in list(raw_state.get("near_misses", []) or [])
+        if isinstance(item, dict)
+    ]
     state["followup_queue"] = [
         item
         for item in _normalize_followup_items(list(raw_state.get("followup_queue", []) or []))
@@ -540,7 +573,8 @@ def set_holes(
     plugin_config: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     limit = int((plugin_config or {}).get("max_holes", 12) or 12)
-    context.set_data(HOLES_KEY, _limit(holes or [], limit))
+    normalized = [_normalize_hole_record(hole) for hole in holes or [] if isinstance(hole, dict)]
+    context.set_data(HOLES_KEY, _limit(normalized, limit))
     sync_output_data(context, plugin_config=plugin_config, dirty=True)
     return context.get_data(HOLES_KEY) or []
 
@@ -599,15 +633,16 @@ def record_near_miss(
     plugin_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     misses = list(context.get_data(NEAR_MISSES_KEY) or [])
+    normalized = _normalize_near_miss_record(near_miss)
     record = {
         "id": str(near_miss.get("id", "") or hashlib.sha1(str(near_miss).encode("utf-8")).hexdigest()[:12]),
         "title": str(near_miss.get("title", "Near miss")).strip(),
         "detail": str(near_miss.get("detail", "")).strip(),
-        "barrier": str(near_miss.get("barrier", "Communicate")).strip() or "Communicate",
-        "severity": _sanitize_severity(str(near_miss.get("severity", "medium"))),
-        "confidence": float(near_miss.get("confidence", 1.0) or 1.0),
-        "created_at": str(near_miss.get("created_at", iso_now())),
-        "fingerprint": str(near_miss.get("fingerprint", "") or ""),
+        "barrier": normalized["barrier"],
+        "severity": normalized["severity"],
+        "confidence": normalized["confidence"],
+        "created_at": normalized["created_at"],
+        "fingerprint": normalized["fingerprint"],
     }
     misses.append(record)
     limit = int((plugin_config or {}).get("max_near_misses", 20) or 20)
@@ -655,6 +690,54 @@ def record_notification_fingerprint(
     notifications.append(record)
     state["notification_history"] = _limit(notifications, NOTIFICATION_HISTORY_LIMIT)
     _commit_state(context, state, plugin_config=plugin_config, dirty=True)
+    return record
+
+
+def record_blocked_followup(
+    context: AgentContext,
+    *,
+    target_context_id: str = "",
+    target_key: str = "",
+    target_kind: str = "chat",
+    target_task_uuid: str = "",
+    target_name: str = "",
+    reason: str,
+    message: str,
+    blocked_reason: str,
+    auto_send: bool,
+    source: str,
+    plugin_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    bundle = ensure_state(context, plugin_config=plugin_config)
+    state = bundle[CHAT_STATE_KEY]
+    resolved_target_key = _target_key_from_fields(target_kind, target_key, target_context_id, target_task_uuid)
+    record = normalize_followup_record(
+        {
+            "fingerprint": make_followup_fingerprint(resolved_target_key, reason, message),
+            "target_key": resolved_target_key,
+            "target_kind": target_kind,
+            "target_context_id": target_context_id,
+            "target_task_uuid": target_task_uuid,
+            "target_name": target_name,
+            "reason": str(reason or "").strip(),
+            "text": str(message or "").strip(),
+            "auto_send": bool(auto_send),
+            "source": str(source or "manual"),
+            "status": "blocked",
+            "delivery_state": "blocked",
+            "created_at": iso_now(),
+            "blocked_reason": str(blocked_reason or "").strip(),
+            "blocked_at": iso_now(),
+        }
+    )
+    _record_history(state, record)
+    _commit_state(
+        context,
+        state,
+        plugin_config=plugin_config,
+        dirty=True,
+        persist_reason="swiss_cheese.followup_blocked",
+    )
     return record
 
 
@@ -758,11 +841,19 @@ def _mark_pending_blocked(
         fingerprint,
         lambda item: {
             **item,
+            "status": "blocked",
             "delivery_state": "blocked",
             "blocked_reason": reason,
             "blocked_at": iso_now(),
         },
     )
+    state["followup_queue"] = [
+        item
+        for item in list(state.get("followup_queue", []))
+        if str(item.get("fingerprint", "") or "") != str(fingerprint or "")
+    ]
+    if blocked is not None:
+        _record_history(state, blocked)
     _commit_state(
         source_context,
         state,
@@ -884,7 +975,7 @@ def _bridge_pending_followup(
             {
                 "title": "Autonomous followup held at gate",
                 "detail": "SwissCheese kept queued autonomy idle until the active chat model context length is confirmed.",
-                "barrier": "Prepare",
+                "barrier": "Readiness",
                 "severity": "medium",
                 "confidence": 1.0,
                 "fingerprint": str(pending.get("fingerprint", "")),
@@ -1133,6 +1224,36 @@ def bridge_next_followup(
             )
 
     return None
+
+
+def retry_followup(
+    context: AgentContext,
+    fingerprint: str,
+    plugin_config: dict[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    bundle = ensure_state(context, plugin_config=plugin_config)
+    state = bundle[CHAT_STATE_KEY]
+    history_item = _find_followup(list(state.get("followup_history", [])), fingerprint)
+    if history_item is None:
+        return False, {"reason": "followup_not_found", "fingerprint": str(fingerprint or "")}
+
+    delivery_state = str(history_item.get("delivery_state", "") or "")
+    if delivery_state not in {"blocked", "removed"}:
+        return False, {"reason": "followup_not_retryable", "fingerprint": str(fingerprint or "")}
+
+    return queue_followup(
+        context,
+        target_key=str(history_item.get("target_key", "") or ""),
+        target_kind=str(history_item.get("target_kind", "chat") or "chat"),
+        target_context_id=str(history_item.get("target_context_id", "") or ""),
+        target_task_uuid=str(history_item.get("target_task_uuid", "") or ""),
+        target_name=str(history_item.get("target_name", "") or ""),
+        reason=str(history_item.get("reason", "") or ""),
+        message=str(history_item.get("text", "") or ""),
+        auto_send=bool(history_item.get("auto_send", False)),
+        source="retry",
+        plugin_config=plugin_config,
+    )
 
 
 def remove_followup(
