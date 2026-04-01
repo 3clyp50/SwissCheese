@@ -79,14 +79,33 @@ function targetLabel(target, { includeQueueability = false } = {}) {
   return parts.join(" | ");
 }
 
+function followupState(item) {
+  return String(item?.delivery_state || item?.status || "").toLowerCase();
+}
+
+function followupTimestamp(item) {
+  return String(item?.sent_at || item?.blocked_at || item?.bridged_at || item?.created_at || "");
+}
+
+function followupPriority(item) {
+  const state = followupState(item);
+  if (item?.entry_source === "pending") return 0;
+  if (state === "blocked") return 1;
+  if (state === "removed") return 2;
+  if (state === "queued_in_target_queue") return 3;
+  if (state === "sent") return 4;
+  return 5;
+}
+
 function followupEntries(chatState) {
   const swiss = chatState?.swiss_cheese_state || {};
   const pending = (swiss.followup_queue || []).map((item) => ({ ...item, entry_source: "pending" }));
   const history = (swiss.followup_history || []).map((item) => ({ ...item, entry_source: "history" }));
-  return [...pending, ...history].sort((left, right) =>
-    String(right.sent_at || right.blocked_at || right.bridged_at || right.created_at || "").localeCompare(
-      String(left.sent_at || left.blocked_at || left.bridged_at || left.created_at || ""),
-    ));
+  return [...pending, ...history].sort((left, right) => {
+    const priorityDiff = followupPriority(left) - followupPriority(right);
+    if (priorityDiff) return priorityDiff;
+    return followupTimestamp(right).localeCompare(followupTimestamp(left));
+  });
 }
 
 function summarizeSeverity(items) {
@@ -214,8 +233,19 @@ export const store = createStore("swissCheese", {
     return followupEntries(this.chatState);
   },
 
+  get hasPriorityFollowups() {
+    return this.followupEntries.some((item) => item.entry_source === "pending" || followupState(item) === "blocked");
+  },
+
   get projectTargets() {
     return this.filteredTargets;
+  },
+
+  get projectTargetOptions() {
+    return this.projectTargets.map((target) => ({
+      ...target,
+      label: this.targetLabel(target, { includeQueueability: true }),
+    }));
   },
 
   get selectedProjectTarget() {

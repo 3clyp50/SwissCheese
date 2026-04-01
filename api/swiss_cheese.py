@@ -7,6 +7,7 @@ from helpers.api import ApiHandler, Request, Response
 
 from usr.plugins.swiss_cheese.helpers import config as swiss_config
 from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
+from usr.plugins.swiss_cheese.helpers.constants import CHAT_STATE_KEY, TRANSIENT_USER_TURN_SIGNAL_KEY
 
 
 def iso_now() -> str:
@@ -71,6 +72,22 @@ class SwissCheese(ApiHandler):
             plugin_config.get("cross_chat_scope", {}),
         )
         state_helper.sync_output_data(context, plugin_config=plugin_config, dirty=True)
+        state_bundle = state_helper.get_state_bundle(context)
+        chat_state = state_bundle.get(CHAT_STATE_KEY, {}) or {}
+        followup_queue = list(chat_state.get("followup_queue", []) or []) if isinstance(chat_state, dict) else []
+        followup_history = list(chat_state.get("followup_history", []) or []) if isinstance(chat_state, dict) else []
+        followup_diagnostics = {
+            "pending_count": len(followup_queue),
+            "history_count": len(followup_history),
+            "priority_exception_count": sum(
+                1
+                for item in [*followup_queue, *followup_history]
+                if str((item or {}).get("status", "") or (item or {}).get("delivery_state", "")).strip().lower()
+                in {"pending", "blocked", "removed"}
+            ),
+        }
+        drift_signal = context.get_data(TRANSIENT_USER_TURN_SIGNAL_KEY) or {}
+        drift_diagnostics = drift_signal if drift_signal.get("drift_suspected") or drift_signal.get("exact_repeat") else None
 
         project_name = project_state.get_project_name(context)
         project_state_payload = None
@@ -102,13 +119,16 @@ class SwissCheese(ApiHandler):
         return {
             "ok": True,
             "context_id": context.id,
-            "state": state_helper.get_state_bundle(context),
-            "chat_state": state_helper.get_state_bundle(context),
+            "state": state_bundle,
+            "chat_state": state_bundle,
             "project_state": project_state_payload,
             "project_rollup": project_rollup,
             "available_views": available_views,
             "default_view": default_view,
             "context_window": ctx_status,
+            "gate_diagnostics": ctx_status.get("gate_diagnostics", {}),
+            "followup_diagnostics": followup_diagnostics,
+            "drift_diagnostics": drift_diagnostics,
             "model_snapshot": {
                 "chat_model": ctx_status.get("chat_model", {}),
                 "utility_model": ctx_status.get("utility_model", {}),

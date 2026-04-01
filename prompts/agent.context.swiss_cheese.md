@@ -5,6 +5,8 @@
 - Cross-chat scope: {{scope_summary}}
 - Recovery budget: {{recovery_summary}}
 - Project rollup: {{project_summary}}
+- Duplicate-user signal: {{duplicate_signal_summary}}
+- Drift signal: {{drift_signal_summary}}
 - Open holes:
 {{holes_text}}
 - Open todos:

@@ -57,6 +57,29 @@ def _todo_detail(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _normalize_text_key(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def infer_intent_key(*parts: Any) -> str:
+    text = " ".join(_normalize_text_key(part) for part in parts if str(part or "").strip())
+    if not text:
+        return ""
+
+    has_archive_context = any(term in text for term in ("archive", "zip", "usr.zip", "zipinfo", "unzip"))
+
+    if any(term in text for term in ("duplicate", "repeat", "prior answer", "regeneration", "same content")):
+        return "duplicate_query_handling"
+    if "swisscheese" in text and any(term in text for term in ("review the latest", "highest-priority open todo", "check swisscheese status")):
+        return "swisscheese_current_chat_review"
+    if has_archive_context:
+        if any(term in text for term in ("mkdir -p", "test -w", "writable", "writability", "preflight", "destination", "source readable", "source readability")):
+            return "archive_preflight_writability"
+        if any(term in text for term in ("unzip -t", "integrity", "zipinfo", "exact archive path", "critical file", "plugin.yaml", "state.json", "validation result", "ls -lh", "archive exists", "file exists", "size")):
+            return "archive_postcondition_validation"
+    return ""
+
+
 def _todo_id(title: str, detail: str, hole_id: str) -> str:
     digest = hashlib.sha1(f"{title}|{detail}|{hole_id}".encode("utf-8")).hexdigest()
     return digest[:12]
@@ -135,6 +158,7 @@ def normalize_followup_record(item: dict[str, Any]) -> dict[str, Any]:
         "target_name": str(item.get("target_name", "") or item.get("name", "") or target_context_id or target_key),
         "reason": str(item.get("reason", "") or "").strip(),
         "text": str(item.get("text", item.get("message", "")) or "").strip(),
+        "intent_key": infer_intent_key(item.get("reason", ""), item.get("text", item.get("message", ""))),
         "auto_send": bool(item.get("auto_send", False)),
         "source": str(item.get("source", "manual") or "manual"),
         "status": status,
@@ -212,6 +236,7 @@ def normalize_todo_record(todo: dict[str, Any]) -> dict[str, Any]:
         "id": todo_id,
         "title": title,
         "detail": detail,
+        "intent_key": infer_intent_key(title, detail),
         "source": str(todo.get("source", "manual") or "manual"),
         "status": _sanitize_status(todo.get("status", "open")),
         "severity": _sanitize_severity(str(todo.get("severity", "medium"))),
@@ -235,11 +260,6 @@ def todo_records_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
     if left_hole_id and right_hole_id and left_hole_id == right_hole_id:
         return True
 
-    left_title = _todo_title_key(left.get("title", ""))
-    right_title = _todo_title_key(right.get("title", ""))
-    if not left_title or not right_title or left_title != right_title:
-        return False
-
     left_scope = str(left.get("scope", "chat") or "chat").strip().lower()
     right_scope = str(right.get("scope", "chat") or "chat").strip().lower()
     if left_scope != right_scope:
@@ -248,9 +268,20 @@ def todo_records_match(left: dict[str, Any], right: dict[str, Any]) -> bool:
     left_project = str(left.get("project_name", "") or "").strip()
     right_project = str(right.get("project_name", "") or "").strip()
     if left_scope == "project" or right_scope == "project":
-        return left_project == right_project
+        if left_project != right_project:
+            return False
 
-    return True
+    left_intent = str(left.get("intent_key", "") or infer_intent_key(left.get("title", ""), left.get("detail", ""))).strip()
+    right_intent = str(right.get("intent_key", "") or infer_intent_key(right.get("title", ""), right.get("detail", ""))).strip()
+    if left_intent and right_intent:
+        return left_intent == right_intent
+
+    left_title = _todo_title_key(left.get("title", ""))
+    right_title = _todo_title_key(right.get("title", ""))
+    if not left_title or not right_title:
+        return False
+
+    return left_title == right_title
 
 
 def merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> dict[str, Any]:
@@ -298,6 +329,11 @@ def merge_todo_records(current: dict[str, Any], incoming: dict[str, Any]) -> dic
         ),
         "title": str(current.get("title", "") or incoming.get("title", "")).strip(),
         "detail": preferred_detail,
+        "intent_key": str(
+            current.get("intent_key", "")
+            or incoming.get("intent_key", "")
+            or infer_intent_key(current.get("title", ""), incoming.get("title", ""), preferred_detail)
+        ).strip(),
         "source": merged_source,
         "status": merged_status,
         "severity": incoming_severity if incoming_rank >= current_rank else current_severity,
@@ -742,11 +778,12 @@ def record_blocked_followup(
 
 
 def make_followup_fingerprint(target_key: str, reason: str, message: str) -> str:
+    intent_key = infer_intent_key(reason, message)
     normalized = "|".join(
         [
             str(target_key or "").strip(),
-            str(reason or "").strip().lower(),
-            " ".join(str(message or "").strip().lower().split()),
+            intent_key or str(reason or "").strip().lower(),
+            "" if intent_key else _normalize_text_key(message),
         ]
     )
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:16]

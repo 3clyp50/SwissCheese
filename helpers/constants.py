@@ -29,6 +29,8 @@ TRANSIENT_RESPONSE_KEY = "_swiss_cheese_response"
 TRANSIENT_AUDIT_TASK_KEY = "_swiss_cheese_audit_task"
 TRANSIENT_LAST_UTILITY_INPUT_KEY = "_swiss_cheese_last_utility_input"
 TRANSIENT_AUTONOMY_ORIGIN_KEY = "_swiss_cheese_autonomy_origin"
+TRANSIENT_LAST_USER_MESSAGE_KEY = "_swiss_cheese_last_user_message"
+TRANSIENT_USER_TURN_SIGNAL_KEY = "_swiss_cheese_user_turn_signal"
 
 BARRIERS = ("Readiness", "Stability", "Direction", "Coordination", "Learning")
 DEFAULT_BARRIER = "Direction"

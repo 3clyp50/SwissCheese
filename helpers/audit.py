@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import asyncio
+from difflib import SequenceMatcher
 import json
 import hashlib
 from typing import TYPE_CHECKING, Any
@@ -22,8 +23,10 @@ from usr.plugins.swiss_cheese.helpers.constants import (
     SEVERITIES,
     TRANSIENT_AUDIT_TASK_KEY,
     TRANSIENT_LAST_UTILITY_INPUT_KEY,
+    TRANSIENT_LAST_USER_MESSAGE_KEY,
     TRANSIENT_REASONING_KEY,
     TRANSIENT_RESPONSE_KEY,
+    TRANSIENT_USER_TURN_SIGNAL_KEY,
     normalize_barrier,
 )
 
@@ -55,6 +58,21 @@ def collect_reasoning(agent: "Agent", full_text: str) -> None:
 
 def collect_response(agent: "Agent", full_text: str) -> None:
     agent.set_data(TRANSIENT_RESPONSE_KEY, full_text or "")
+
+
+def _user_turn_signal(agent: "Agent") -> dict[str, Any]:
+    return dict(agent.context.get_data(TRANSIENT_USER_TURN_SIGNAL_KEY) or {})
+
+
+def _references_prior_answer(text: str) -> bool:
+    lowered = str(text or "").lower()
+    return any(term in lowered for term in ("previous", "earlier", "already", "as noted", "as mentioned", "prior answer", "clarify"))
+
+
+def _similarity(left: str, right: str) -> float:
+    if not left or not right:
+        return 0.0
+    return SequenceMatcher(None, left.strip().lower(), right.strip().lower()).ratio()
 
 
 def _recent_history_text(agent: "Agent", limit: int) -> str:
@@ -121,12 +139,16 @@ def _build_audit_message(agent: "Agent", plugin_config: dict[str, Any], ctx_stat
             "chat_model": ctx_status.get("chat_model", {}),
             "utility_model": ctx_status.get("utility_model", {}),
             "gate_active": ctx_status.get("gate_active", False),
+            "gate_diagnostics": ctx_status.get("gate_diagnostics", {}),
             "utility_warning_active": ctx_status.get("utility_warning_active", False),
+            "utility_warning_diagnostics": ctx_status.get("utility_warning_diagnostics", {}),
         },
         "current_reasoning_response_evidence": {
             "reasoning": reasoning,
             "response": response,
         },
+        "current_user_turn_signal": _user_turn_signal(agent),
+        "current_user_message_snapshot": agent.context.get_data(TRANSIENT_LAST_USER_MESSAGE_KEY) or {},
         "open_holes": agent.context.get_data("holes") or [],
         "open_todos": agent.context.get_data("todos") or [],
         "shared_project_backlog": project_state.list_project_todos(agent.context, status="all"),
@@ -232,6 +254,7 @@ def _normalize_near_miss(raw: dict[str, Any]) -> dict[str, Any]:
 def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, Any]:
     reasoning = str(agent.get_data(TRANSIENT_REASONING_KEY) or "")
     response = str(agent.get_data(TRANSIENT_RESPONSE_KEY) or "")
+    turn_signal = _user_turn_signal(agent)
     holes: list[dict[str, Any]] = []
     todos: list[dict[str, Any]] = []
 
@@ -260,9 +283,65 @@ def _heuristic_result(agent: "Agent", ctx_status: dict[str, Any]) -> dict[str, A
                 "severity": "high",
                 "confidence": 1.0,
                 "title": "Chat context length is unconfirmed",
-                "evidence": "SwissCheese autonomy is gated until the active chat model context length is explicitly confirmed.",
+                "evidence": ctx_status.get("gate_diagnostics", {}).get("message")
+                or "SwissCheese autonomy is gated until the active chat model context length is explicitly confirmed.",
                 "trajectory": "Autonomous continuation may outrun the verified token budget.",
                 "todo": "Confirm the active chat model context length before auto-recovery runs.",
+            }
+        )
+
+    if turn_signal.get("drift_suspected"):
+        holes.append(
+            {
+                "kind": "latent_condition",
+                "pattern": "project_mismatch",
+                "barrier": "Direction",
+                "severity": "medium",
+                "confidence": 0.82,
+                "title": "Possible topic drift inside the current chat",
+                "evidence": json.dumps(
+                    {
+                        "context": turn_signal.get("context_name", ""),
+                        "project": turn_signal.get("project_title", ""),
+                        "previous_overlap": turn_signal.get("previous_overlap", 0.0),
+                        "anchor_overlap": turn_signal.get("anchor_overlap", 0.0),
+                        "message_excerpt": turn_signal.get("message_excerpt", ""),
+                    },
+                    ensure_ascii=False,
+                ),
+                "trajectory": "A sharp topic pivot can hide scope drift and make same-project reachability look more relevant than it is.",
+                "todo": "Acknowledge the topic drift explicitly and confirm whether the chat should switch scope.",
+            }
+        )
+
+    prior_response_excerpt = str(turn_signal.get("previous_response_excerpt", "") or "")
+    if (
+        turn_signal.get("exact_repeat")
+        and response
+        and prior_response_excerpt
+        and (
+            _similarity(prior_response_excerpt, response) >= 0.55
+            or not _references_prior_answer(response)
+        )
+    ):
+        holes.append(
+            {
+                "kind": "active_failure",
+                "pattern": "low_energy_effort",
+                "barrier": "Direction",
+                "severity": "medium",
+                "confidence": 0.88,
+                "title": "Repeated request produced overlapping work",
+                "evidence": json.dumps(
+                    {
+                        "message_excerpt": turn_signal.get("message_excerpt", ""),
+                        "previous_message_excerpt": turn_signal.get("previous_message_excerpt", ""),
+                        "previous_response_excerpt": prior_response_excerpt,
+                    },
+                    ensure_ascii=False,
+                ),
+                "trajectory": "Exact-repeat requests should reference the prior answer or ask whether refinement is needed instead of regenerating the same work.",
+                "todo": "Reference the prior answer instead of regenerating the full response.",
             }
         )
 

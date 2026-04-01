@@ -23,7 +23,7 @@
               @click="$store.swissCheese.bridgeFollowup('', false)"
               :disabled="!$store.swissCheese.followupEntries.some((item) => item.entry_source === 'pending')"
             >
-              Bridge first pending
+              Send next pending
             </button>
           </div>
         </div>
@@ -92,86 +92,97 @@
             </div>
 
             <div class="swiss-cheese-grid">
-              <section class="swiss-card">
+              <section class="swiss-card swiss-summary-card">
                 <div class="swiss-card-title">Status</div>
-                <div class="swiss-metric-list swiss-metric-list-inline">
-                  <div class="swiss-metric">
+                <div class="swiss-summary-toolbar">
+                  <div class="swiss-summary-chip">
                     <span>Chat gate</span>
                     <strong x-text="$store.swissCheese.contextWindow?.gate_active ? 'Blocked' : 'Open'"></strong>
                   </div>
-                  <div class="swiss-metric">
-                    <span>Utility signal</span>
+                  <div class="swiss-summary-chip">
+                    <span>Utility</span>
                     <strong x-text="$store.swissCheese.contextWindow?.utility_confidence || 'normal'"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Audit</span>
                     <strong x-text="$store.swissCheese.chatState?.audit_status?.state || 'idle'"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Recovery</span>
                     <strong x-text="(($store.swissCheese.chatState?.recovery_budget?.used_cycles || 0) + ' / ' + ($store.swissCheese.chatState?.recovery_budget?.max_cycles || 0))"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Main tokens</span>
                     <strong x-text="$store.swissCheese.contextWindow?.chat_model?.current_tokens || 0"></strong>
                   </div>
-                  <div class="swiss-metric">
-                    <span>Remaining budget</span>
+                  <div class="swiss-summary-chip">
+                    <span>Budget left</span>
                     <strong x-text="$store.swissCheese.contextWindow?.chat_model?.remaining_budget || 0"></strong>
                   </div>
                 </div>
-                <div class="swiss-inline-note">
-                  <strong>Main model:</strong>
-                  <span x-text="($store.swissCheese.contextWindow?.chat_model?.provider || 'unconfigured') + '/' + ($store.swissCheese.contextWindow?.chat_model?.name || 'default')"></span>
-                </div>
-                <div class="swiss-inline-note">
-                  <strong>Utility model:</strong>
-                  <span x-text="($store.swissCheese.contextWindow?.utility_model?.provider || 'unconfigured') + '/' + ($store.swissCheese.contextWindow?.utility_model?.name || 'default')"></span>
+                <div class="swiss-summary-footer">
+                  <div class="swiss-inline-note">
+                    <strong>Main model:</strong>
+                    <span x-text="($store.swissCheese.contextWindow?.chat_model?.provider || 'unconfigured') + '/' + ($store.swissCheese.contextWindow?.chat_model?.name || 'default')"></span>
+                  </div>
+                  <div class="swiss-inline-note">
+                    <strong>Utility model:</strong>
+                    <span x-text="($store.swissCheese.contextWindow?.utility_model?.provider || 'unconfigured') + '/' + ($store.swissCheese.contextWindow?.utility_model?.name || 'default')"></span>
+                  </div>
+                  <div
+                    class="swiss-inline-note"
+                    x-show="$store.swissCheese.contextWindow?.gate_diagnostics?.message || $store.swissCheese.contextWindow?.utility_warning_diagnostics?.message"
+                  >
+                    <strong>Why gated:</strong>
+                    <span x-text="$store.swissCheese.contextWindow?.gate_diagnostics?.message || $store.swissCheese.contextWindow?.utility_warning_diagnostics?.message || ''"></span>
+                  </div>
                 </div>
               </section>
 
-              <section class="swiss-card">
+              <section class="swiss-card swiss-summary-card">
                 <div class="swiss-card-title">Reach</div>
-                <div class="swiss-metric-list swiss-metric-list-inline">
-                  <div class="swiss-metric">
+                <div class="swiss-summary-toolbar">
+                  <div class="swiss-summary-chip">
                     <span>Current target</span>
                     <strong x-text="$store.swissCheese.chatCenterLabel"></strong>
                   </div>
-                  <div class="swiss-metric">
-                    <span>Visible targets</span>
+                  <div class="swiss-summary-chip">
+                    <span>Visible</span>
                     <strong x-text="$store.swissCheese.targetCatalog.length"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Actionable</span>
                     <strong x-text="$store.swissCheese.actionableTargets.length"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Read-only</span>
                     <strong x-text="$store.swissCheese.readOnlyTargets.length"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Chats</span>
                     <strong x-text="$store.swissCheese.targetCatalogCounts?.chat || 0"></strong>
                   </div>
-                  <div class="swiss-metric">
+                  <div class="swiss-summary-chip">
                     <span>Tasks</span>
                     <strong x-text="$store.swissCheese.targetCatalogCounts?.task || 0"></strong>
                   </div>
                 </div>
-                <div class="swiss-inline-note">
-                  <strong>Filter:</strong>
-                  <span x-text="$store.swissCheese.targetKindFilter"></span>
-                </div>
-                <div class="swiss-inline-note">
-                  <strong>Scope:</strong>
-                  <span x-text="$store.swissCheese.projectOnly ? 'current project' : 'all reachable contexts'"></span>
+                <div class="swiss-summary-footer">
+                  <div class="swiss-inline-note">
+                    <strong>Filter:</strong>
+                    <span x-text="$store.swissCheese.targetKindFilter"></span>
+                  </div>
+                  <div class="swiss-inline-note">
+                    <strong>Scope:</strong>
+                    <span x-text="$store.swissCheese.projectOnly ? 'current project' : 'all reachable contexts'"></span>
+                  </div>
                 </div>
               </section>
 
               <template x-if="$store.swissCheese.isChatView">
                 <section class="swiss-card swiss-card-wide">
                   <div class="swiss-card-title">Context Map</div>
-                  <div class="swiss-map-layout">
+                  <div class="swiss-map-layout swiss-map-layout-chat">
                     <div class="swiss-map-surface swiss-chat-map">
                       <svg class="swiss-map-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                         <circle cx="50" cy="50" r="30" class="swiss-orbit-ring"></circle>
@@ -276,9 +287,22 @@
                         <strong x-text="$store.swissCheese.readOnlyTargets.length"></strong>
                       </div>
                     </div>
+                    <div class="swiss-project-target-picker" x-show="$store.swissCheese.projectTargetOptions.length">
+                      <label for="swiss-project-target-select">Same-project target</label>
+                      <select
+                        id="swiss-project-target-select"
+                        class="swiss-select"
+                        x-model="$store.swissCheese.projectMapTargetKey"
+                        @change="$store.swissCheese.selectProjectTarget($event.target.value)"
+                      >
+                        <template x-for="target in $store.swissCheese.projectTargetOptions" :key="target.target_key">
+                          <option :value="target.target_key" x-text="target.label"></option>
+                        </template>
+                      </select>
+                    </div>
                   </div>
 
-                  <div class="swiss-map-layout">
+                  <div class="swiss-map-layout swiss-map-layout-project">
                     <div class="swiss-map-surface swiss-project-map">
                       <svg class="swiss-map-lines" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
                         <template x-for="target in $store.swissCheese.projectGraphNodes" :key="target.target_key">
@@ -328,40 +352,72 @@
                             ></span>
                           </div>
 
-                          <div class="swiss-metric-list swiss-metric-list-inline">
-                            <div class="swiss-metric">
-                              <span>Issues</span>
-                              <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.hole_count || 0"></strong>
-                            </div>
-                            <div class="swiss-metric">
-                              <span>Backlog</span>
-                              <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.open_todo_count || 0"></strong>
-                            </div>
-                            <div class="swiss-metric">
-                              <span>Near misses</span>
-                              <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.near_miss_count || 0"></strong>
-                            </div>
-                            <div class="swiss-metric">
-                              <span>Queue</span>
-                              <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.native_queue_count || 0"></strong>
-                            </div>
-                          </div>
-
-                          <div class="swiss-inline-note">
-                            <strong>Match:</strong>
-                            <span x-text="$store.swissCheese.inspection.match_type || 'n/a'"></span>
-                          </div>
-                          <div class="swiss-inline-note">
-                            <strong>Project:</strong>
-                            <span x-text="$store.swissCheese.inspection.target?.project_title || $store.swissCheese.inspection.target?.project_name || 'none'"></span>
-                          </div>
-                          <div class="swiss-inline-note" x-show="$store.swissCheese.inspection.target?.kind === 'task'">
-                            <strong>Scheduler:</strong>
-                            <span x-text="(($store.swissCheese.inspection.target?.scheduler?.type || 'task') + ' / ' + ($store.swissCheese.inspection.target?.scheduler?.state || 'unknown'))"></span>
-                          </div>
-                          <div class="swiss-inline-note" x-show="$store.swissCheese.inspection.target?.kind === 'task'">
-                            <strong>Next run:</strong>
-                            <span x-text="$store.swissCheese.inspection.target?.scheduler?.next_run || 'n/a'"></span>
+                          <div class="swiss-accordion">
+                            <details class="swiss-accordion-item" open>
+                              <summary>Summary</summary>
+                              <div class="swiss-accordion-content">
+                                <div class="swiss-metric-list swiss-metric-list-inline">
+                                  <div class="swiss-metric">
+                                    <span>Issues</span>
+                                    <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.hole_count || 0"></strong>
+                                  </div>
+                                  <div class="swiss-metric">
+                                    <span>Backlog</span>
+                                    <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.open_todo_count || 0"></strong>
+                                  </div>
+                                  <div class="swiss-metric">
+                                    <span>Near misses</span>
+                                    <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.near_miss_count || 0"></strong>
+                                  </div>
+                                  <div class="swiss-metric">
+                                    <span>Queue</span>
+                                    <strong x-text="$store.swissCheese.inspection.target?.state_excerpt?.native_queue_count || 0"></strong>
+                                  </div>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Target:</strong>
+                                  <span x-text="$store.swissCheese.inspection.target?.kind === 'task' ? 'task' : 'chat'"></span>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Project:</strong>
+                                  <span x-text="$store.swissCheese.inspection.target?.project_title || $store.swissCheese.inspection.target?.project_name || 'none'"></span>
+                                </div>
+                              </div>
+                            </details>
+                            <details class="swiss-accordion-item" open>
+                              <summary>Reachability</summary>
+                              <div class="swiss-accordion-content">
+                                <div class="swiss-inline-note">
+                                  <strong>Match:</strong>
+                                  <span x-text="$store.swissCheese.inspection.match_type || 'n/a'"></span>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Queueable:</strong>
+                                  <span x-text="$store.swissCheese.inspection.permissions?.can_queue ? 'yes' : 'no'"></span>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Scope:</strong>
+                                  <span x-text="$store.swissCheese.projectOnly ? 'current project' : 'all reachable contexts'"></span>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Selection:</strong>
+                                  <span x-text="$store.swissCheese.selectedProjectTarget?.name || 'n/a'"></span>
+                                </div>
+                              </div>
+                            </details>
+                            <details class="swiss-accordion-item" x-show="$store.swissCheese.inspection.target?.kind === 'task'">
+                              <summary>Scheduler</summary>
+                              <div class="swiss-accordion-content">
+                                <div class="swiss-inline-note">
+                                  <strong>Scheduler:</strong>
+                                  <span x-text="(($store.swissCheese.inspection.target?.scheduler?.type || 'task') + ' / ' + ($store.swissCheese.inspection.target?.scheduler?.state || 'unknown'))"></span>
+                                </div>
+                                <div class="swiss-inline-note">
+                                  <strong>Next run:</strong>
+                                  <span x-text="$store.swissCheese.inspection.target?.scheduler?.next_run || 'n/a'"></span>
+                                </div>
+                              </div>
+                            </details>
                           </div>
                         </div>
                       </template>
@@ -398,6 +454,55 @@
                   </div>
                 </template>
               </section>
+
+              <template x-if="$store.swissCheese.hasPriorityFollowups">
+                <section class="swiss-card swiss-card-wide">
+                  <div class="swiss-card-title">Followups</div>
+                  <div class="swiss-inline-note">Automatic delivery stays the default. Manual actions remain only for pending, blocked, or removed exceptions.</div>
+                  <template x-if="!$store.swissCheese.followupEntries.length">
+                    <div class="swiss-empty">No followups in queue or history.</div>
+                  </template>
+                  <template x-if="$store.swissCheese.followupEntries.length">
+                    <div class="swiss-list">
+                      <template x-for="item in $store.swissCheese.followupEntries" :key="`${item.fingerprint}-${item.delivery_state || item.status}-${item.entry_source}`">
+                        <div class="swiss-list-item swiss-followup-item">
+                          <div class="swiss-followup-body">
+                            <div class="swiss-item-header">
+                              <div>
+                                <strong x-text="item.reason"></strong>
+                                <div class="swiss-hole-detail" x-text="item.target_name ? ('Target: ' + item.target_name) : item.target_key"></div>
+                              </div>
+                              <div class="swiss-node-badges">
+                                <span class="swiss-node-badge swiss-node-count" x-text="item.entry_source"></span>
+                                <span
+                                  class="swiss-node-badge swiss-node-severity"
+                                  :data-severity="item.delivery_state === 'blocked' ? 'high' : ((item.delivery_state === 'sent' || item.delivery_state === 'queued_in_target_queue') ? 'low' : 'medium')"
+                                  x-text="item.delivery_state || item.status || 'pending'"
+                                ></span>
+                              </div>
+                            </div>
+                            <div class="swiss-hole-detail" x-text="item.text || ''"></div>
+                            <div class="swiss-hole-detail" x-show="item.blocked_reason" x-text="'Blocked: ' + item.blocked_reason"></div>
+                          </div>
+
+                          <div class="swiss-inline-actions">
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, false)">Bridge</button>
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, true)">Send now</button>
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.removeFollowup(item.fingerprint)">Remove</button>
+                            <button
+                              class="btn btn-small"
+                              x-show="item.delivery_state === 'blocked' || item.delivery_state === 'removed' || item.status === 'blocked' || item.status === 'removed'"
+                              @click="$store.swissCheese.retryFollowup(item.fingerprint)"
+                            >
+                              Retry
+                            </button>
+                          </div>
+                        </div>
+                      </template>
+                    </div>
+                  </template>
+                </section>
+              </template>
 
               <section class="swiss-card">
                 <div class="swiss-card-title">Active Chat Backlog</div>
@@ -472,52 +577,54 @@
                 </template>
               </section>
 
-              <section class="swiss-card swiss-card-wide">
-                <div class="swiss-card-title">Followups</div>
-                <div class="swiss-inline-note">Automatic delivery stays the default. Manual actions remain only for pending, blocked, or removed exceptions.</div>
-                <template x-if="!$store.swissCheese.followupEntries.length">
-                  <div class="swiss-empty">No followups in queue or history.</div>
-                </template>
-                <template x-if="$store.swissCheese.followupEntries.length">
-                  <div class="swiss-list">
-                    <template x-for="item in $store.swissCheese.followupEntries" :key="`${item.fingerprint}-${item.delivery_state || item.status}-${item.entry_source}`">
-                      <div class="swiss-list-item swiss-followup-item">
-                        <div class="swiss-followup-body">
-                          <div class="swiss-item-header">
-                            <div>
-                              <strong x-text="item.reason"></strong>
-                              <div class="swiss-hole-detail" x-text="item.target_name ? ('Target: ' + item.target_name) : item.target_key"></div>
+              <template x-if="!$store.swissCheese.hasPriorityFollowups">
+                <section class="swiss-card swiss-card-wide">
+                  <div class="swiss-card-title">Followups</div>
+                  <div class="swiss-inline-note">Automatic delivery stays the default. Manual actions remain only for pending, blocked, or removed exceptions.</div>
+                  <template x-if="!$store.swissCheese.followupEntries.length">
+                    <div class="swiss-empty">No followups in queue or history.</div>
+                  </template>
+                  <template x-if="$store.swissCheese.followupEntries.length">
+                    <div class="swiss-list">
+                      <template x-for="item in $store.swissCheese.followupEntries" :key="`${item.fingerprint}-${item.delivery_state || item.status}-${item.entry_source}`">
+                        <div class="swiss-list-item swiss-followup-item">
+                          <div class="swiss-followup-body">
+                            <div class="swiss-item-header">
+                              <div>
+                                <strong x-text="item.reason"></strong>
+                                <div class="swiss-hole-detail" x-text="item.target_name ? ('Target: ' + item.target_name) : item.target_key"></div>
+                              </div>
+                              <div class="swiss-node-badges">
+                                <span class="swiss-node-badge swiss-node-count" x-text="item.entry_source"></span>
+                                <span
+                                  class="swiss-node-badge swiss-node-severity"
+                                  :data-severity="item.delivery_state === 'blocked' ? 'high' : ((item.delivery_state === 'sent' || item.delivery_state === 'queued_in_target_queue') ? 'low' : 'medium')"
+                                  x-text="item.delivery_state || item.status || 'pending'"
+                                ></span>
+                              </div>
                             </div>
-                            <div class="swiss-node-badges">
-                              <span class="swiss-node-badge swiss-node-count" x-text="item.entry_source"></span>
-                              <span
-                                class="swiss-node-badge swiss-node-severity"
-                                :data-severity="item.delivery_state === 'blocked' ? 'high' : ((item.delivery_state === 'sent' || item.delivery_state === 'queued_in_target_queue') ? 'low' : 'medium')"
-                                x-text="item.delivery_state || item.status || 'pending'"
-                              ></span>
-                            </div>
+                            <div class="swiss-hole-detail" x-text="item.text || ''"></div>
+                            <div class="swiss-hole-detail" x-show="item.blocked_reason" x-text="'Blocked: ' + item.blocked_reason"></div>
                           </div>
-                          <div class="swiss-hole-detail" x-text="item.text || ''"></div>
-                          <div class="swiss-hole-detail" x-show="item.blocked_reason" x-text="'Blocked: ' + item.blocked_reason"></div>
-                        </div>
 
-                        <div class="swiss-inline-actions">
-                          <button class="btn btn-small" x-show="item.entry_source === 'pending'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, false)">Bridge</button>
-                          <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, true)">Send now</button>
-                          <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.removeFollowup(item.fingerprint)">Remove</button>
-                          <button
-                            class="btn btn-small"
-                            x-show="item.delivery_state === 'blocked' || item.delivery_state === 'removed' || item.status === 'blocked' || item.status === 'removed'"
-                            @click="$store.swissCheese.retryFollowup(item.fingerprint)"
-                          >
-                            Retry
-                          </button>
+                          <div class="swiss-inline-actions">
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, false)">Bridge</button>
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.bridgeFollowup(item.fingerprint, true)">Send now</button>
+                            <button class="btn btn-small" x-show="item.entry_source === 'pending' || item.delivery_state === 'queued_in_target_queue'" @click="$store.swissCheese.removeFollowup(item.fingerprint)">Remove</button>
+                            <button
+                              class="btn btn-small"
+                              x-show="item.delivery_state === 'blocked' || item.delivery_state === 'removed' || item.status === 'blocked' || item.status === 'removed'"
+                              @click="$store.swissCheese.retryFollowup(item.fingerprint)"
+                            >
+                              Retry
+                            </button>
+                          </div>
                         </div>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-              </section>
+                      </template>
+                    </div>
+                  </template>
+                </section>
+              </template>
             </div>
           </div>
         </template>
@@ -620,6 +727,47 @@
       font-size: 0.98rem;
     }
 
+    .swiss-summary-card {
+      gap: 0.6rem;
+    }
+
+    .swiss-summary-toolbar {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(8.75rem, 1fr));
+      gap: 0.5rem;
+    }
+
+    .swiss-summary-chip {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      border: 1px solid color-mix(in srgb, var(--color-border) 86%, transparent);
+      border-radius: 12px;
+      padding: 0.55rem 0.65rem;
+      background: color-mix(in srgb, var(--color-panel) 93%, black 7%);
+      min-height: 3rem;
+    }
+
+    .swiss-summary-chip span {
+      color: var(--color-text-secondary);
+      font-size: 0.72rem;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
+    .swiss-summary-chip strong {
+      font-size: 0.92rem;
+      line-height: 1.2;
+      font-weight: 650;
+    }
+
+    .swiss-summary-footer {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem 1rem;
+      align-items: center;
+    }
+
     .swiss-card-actions {
       display: flex;
       justify-content: flex-end;
@@ -652,11 +800,50 @@
       white-space: pre-wrap;
     }
 
+    .swiss-project-overview {
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+      margin-bottom: 0.1rem;
+    }
+
+    .swiss-project-target-picker {
+      display: flex;
+      flex-direction: column;
+      gap: 0.35rem;
+      min-width: min(100%, 22rem);
+    }
+
+    .swiss-project-target-picker label {
+      color: var(--color-text-secondary);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .swiss-select {
+      width: 100%;
+      border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
+      border-radius: 10px;
+      padding: 0.5rem 0.65rem;
+      background: color-mix(in srgb, var(--color-panel) 94%, black 6%);
+      color: inherit;
+      font: inherit;
+    }
+
     .swiss-map-layout {
       display: grid;
       grid-template-columns: minmax(0, 1.4fr) minmax(18rem, 0.9fr);
       gap: 1rem;
-      align-items: stretch;
+      align-items: start;
+    }
+
+    .swiss-map-layout-chat {
+      grid-template-columns: minmax(0, 1.18fr) minmax(14rem, 0.72fr);
+    }
+
+    .swiss-map-layout-project {
+      grid-template-columns: minmax(0, 1.35fr) minmax(18rem, 0.9fr);
     }
 
     .swiss-map-surface {
@@ -834,10 +1021,10 @@
 
     .swiss-map-detail {
       min-width: 0;
+      align-self: start;
     }
 
     .swiss-detail-card {
-      height: 100%;
       border: 1px solid color-mix(in srgb, var(--color-border) 88%, transparent);
       border-radius: 16px;
       padding: 0.9rem;
@@ -845,6 +1032,8 @@
       display: flex;
       flex-direction: column;
       gap: 0.8rem;
+      align-self: start;
+      height: auto;
     }
 
     .swiss-detail-header,
@@ -869,8 +1058,42 @@
       white-space: pre-wrap;
     }
 
-    .swiss-project-overview {
-      margin-bottom: 0.1rem;
+    .swiss-accordion {
+      display: flex;
+      flex-direction: column;
+      gap: 0.6rem;
+    }
+
+    .swiss-accordion-item {
+      border: 1px solid color-mix(in srgb, var(--color-border) 86%, transparent);
+      border-radius: 12px;
+      padding: 0.55rem 0.7rem;
+      background: color-mix(in srgb, var(--color-panel) 95%, white 5%);
+    }
+
+    .swiss-accordion-item[open] {
+      border-color: color-mix(in srgb, var(--color-primary) 28%, var(--color-border));
+    }
+
+    .swiss-accordion-item summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.5rem;
+      cursor: pointer;
+      font-weight: 650;
+      list-style: none;
+    }
+
+    .swiss-accordion-item summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .swiss-accordion-content {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      padding-top: 0.55rem;
     }
 
     .swiss-list,
@@ -945,6 +1168,11 @@
 
     @media (max-width: 1080px) {
       .swiss-map-layout {
+        grid-template-columns: 1fr;
+      }
+
+      .swiss-map-layout-chat,
+      .swiss-map-layout-project {
         grid-template-columns: 1fr;
       }
     }

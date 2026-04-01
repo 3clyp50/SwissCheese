@@ -1,0 +1,73 @@
+**IMMEDIATE ACTION**: Use `read_file` to load `.handoffs/handoff-swiss-cheese-20260401-132808.md` and parse its contents. Do NOT search the web, query external APIs, or call any tool other than file-reading tools until Phase 3 is complete.
+
+---
+
+## Context Bootstrap
+
+**Step 1**: Read the workflow handoff document at `.handoffs/handoff-swiss-cheese-20260401-132808.md`.
+
+### Phase 1: Load State
+Parse all sections. Internalize:
+- State Vector (objective, phase, blockers)
+- Context Frame (decisions, constraints, patterns)
+- Code Map (modified files, reference anchors)
+- Forward Vector (next actions, success criteria)
+
+### Phase 2: Explore & Verify
+Examine these locations to build working knowledge:
+
+**Code Exploration** *(read and understand)*:
+- [ ] `api/swiss_cheese.py:63-131` — state payload assembly, diagnostic exposure, current backend surface to the UI
+- [ ] `helpers/context_window.py:82-289` — gate lineage, confirmation diagnostics, stale mirror detection
+- [ ] `helpers/state.py:64-79` — semantic intent taxonomy
+- [ ] `helpers/state.py:123-161` — followup normalization and intent propagation
+- [ ] `helpers/state.py:230-309` — todo normalization, matching, merge behavior
+- [ ] `helpers/state.py:780-829` — followup fingerprinting and queue dedupe
+- [ ] `extensions/python/user_message_ui/_10_swiss_cheese_user_turn.py:45-102` — exact-repeat and drift-suspected signal generation
+- [ ] `extensions/python/message_loop_prompts_after/_55_swiss_cheese_state.py:30-117` — prompt-side exposure of gate/duplicate/drift context
+- [ ] `helpers/audit.py:127-150` — audit payload construction
+- [ ] `helpers/audit.py:254-339` — heuristic holes for gate, drift, repeated-work overlap
+- [ ] `webui/main.html:95-172` — compact status/reach summary and gate explanation row
+- [ ] `webui/main.html:291-408` — project-view dropdown + accordion detail
+- [ ] `webui/main.html:458-621` — priority followup placement
+- [ ] `webui/swiss-cheese-store.js:82-108` — followup prioritization/sorting
+- [ ] `webui/swiss-cheese-store.js:236-248` — `hasPriorityFollowups` and project target options
+- [ ] `tests/test_swiss_cheese_plugin.py:384-1560` — regression expectations added this session
+
+**Runtime Evidence Review** *(authoritative truth)*:
+- [ ] `usr/chats/M0IcqC0U/chat.json` — drift/laptop-buying case
+- [ ] `usr/chats/xL1yiPWr/chat.json` — repeated-message / overlapping-work case
+- [ ] `usr/chats/XXmv3e1p/chat.json` — Plugin Zipping spam case
+- [ ] `usr/projects/project_1/.a0proj/plugins/swiss_cheese/state.json` — project notification/project backlog state
+- [ ] `usr/plugins/_model_config/config.json` — live model config
+- [ ] `usr/plugins/swiss_cheese/config.json` — confirmed tuple registry and plugin config
+
+**Support Files**:
+- [ ] `helpers/config.py:243-377` — model scope resolution and live sync
+- [ ] `helpers/discovery.py:458-715` — reachability, inspect target, project rollup
+- [ ] `helpers/project_state.py:55-153` — project backlog persistence
+- [ ] `prompts/agent.context.swiss_cheese.md:1-13` — prompt slots for duplicate/drift signals
+
+### Phase 3: Knowledge Proof
+After exploration, output a **Context Summary** (150-300 words) demonstrating understanding of:
+
+1. **Objective**: What we're building/solving and why
+2. **Architecture**: Key components and their relationships
+3. **Current State**: Where we are, what's done, what's pending
+4. **Constraints**: Boundaries and non-negotiables
+5. **Next Move**: Immediate action to resume work
+
+Format as structured bullets. Include specific file/line references to prove code familiarity.
+
+### Phase 4: Acknowledge
+Conclude summary with:
+
+~~~text
+---
+✓ CONTEXT LOADED | Ready to resume: run scenario-driven manual regression against the runtime bundle and live modal
+~~~
+
+Do not proceed with any implementation until acknowledgment is complete. User will confirm or request clarification.
+
+---
+*Handoff generated: 2026-04-01T13:28:08Z*

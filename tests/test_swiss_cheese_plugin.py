@@ -57,7 +57,7 @@ from usr.plugins.swiss_cheese.api.swiss_cheese import SwissCheese as SwissCheese
 from usr.plugins.swiss_cheese.helpers import audit, config as swiss_config
 from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
 from usr.plugins.swiss_cheese.helpers.config import DEFAULT_CONFIG as SWISS_DEFAULT_CONFIG
-from usr.plugins.swiss_cheese.helpers.constants import CHAT_STATE_KEY, CTX_CONFIRMATION_KEY, NEAR_MISSES_KEY, PROJECT_STATE_FILENAME, TRANSIENT_RESPONSE_KEY
+from usr.plugins.swiss_cheese.helpers.constants import CHAT_STATE_KEY, CTX_CONFIRMATION_KEY, NEAR_MISSES_KEY, PROJECT_STATE_FILENAME, TRANSIENT_AUTONOMY_ORIGIN_KEY, TRANSIENT_RESPONSE_KEY
 from usr.plugins.swiss_cheese.tools.swiss_cheese import SwissCheese as SwissCheeseTool
 
 
@@ -380,7 +380,8 @@ def test_legacy_profile_scoped_config_absorbs_into_surviving_scope(
     assert store[("swiss_cheese", "", "")]["preferred_working_limit"] == 97000
 
 
-def test_context_window_gate_warning_advisory_and_invalidation(
+@pytest.mark.asyncio
+async def test_context_window_gate_warning_advisory_and_invalidation(
     context_factory,
     in_memory_plugin_backend: dict[str, Any],
     project_name_factory,
@@ -439,6 +440,16 @@ def test_context_window_gate_warning_advisory_and_invalidation(
     invalidated = context_window.compute_context_window_status(agent)
     assert invalidated["gate_active"] is True
     assert invalidated["chat_model"]["confirmed"] is False
+
+    api = _new_api()
+    state_payload = await api.process({"action": "get_state", "context_id": ctx.id}, None)
+    assert state_payload["ok"] is True
+    assert state_payload["context_window"]["gate_active"] is True
+    assert state_payload["context_window"]["chat_model"]["confirmed"] is False
+    assert state_payload["model_snapshot"]["chat_model"]["confirmed"] is False
+    assert state_payload["state"][CTX_CONFIRMATION_KEY]["gate_active"] is True
+    assert state_payload["state"][CTX_CONFIRMATION_KEY]["chat_model"]["confirmed"] is False
+    assert state_payload["state"][CTX_CONFIRMATION_KEY]["chat_model"]["name"] == "gpt-chat-next"
 
 
 @pytest.mark.asyncio
@@ -877,6 +888,136 @@ def test_followup_fingerprint_uses_target_key_for_shared_task_contexts(context_f
     assert first["fingerprint"] != second["fingerprint"]
 
 
+def test_duplicate_followup_fingerprint_blocks_repeated_work_across_pending_and_last_autonomous(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("repeat-work")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    source = make_context(name="Source Chat", project=project_name, profile="pilot")
+    target = make_context(name="Target Chat", project=project_name, profile="pilot")
+    plugin_config = swiss_config.get_plugin_config(source.get_agent())
+    source.set_data(CTX_CONFIRMATION_KEY, {"gate_active": False})
+
+    queued, item = state_helper.queue_followup(
+        source,
+        target_key=f"chat:{target.id}",
+        target_kind="chat",
+        target_context_id=target.id,
+        target_name=target.name or target.id,
+        reason="repeat_request",
+        message="Please run `unzip -t /a0/usr/projects/project_1/usr.zip` and report the exit status.",
+        auto_send=True,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert queued is True
+
+    duplicate_pending, pending_info = state_helper.queue_followup(
+        source,
+        target_key=f"chat:{target.id}",
+        target_kind="chat",
+        target_context_id=target.id,
+        target_name=target.name or target.id,
+        reason="repeat_request",
+        message=" please   RUN `UNZIP -t /a0/usr/projects/project_1/usr.zip` and report the exit status. ",
+        auto_send=True,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert duplicate_pending is False
+    assert pending_info["reason"] == "duplicate_pending"
+    assert pending_info["fingerprint"] == item["fingerprint"]
+
+    sent = state_helper.bridge_next_followup(source, plugin_config=plugin_config, manual=False)
+    assert sent is not None
+    assert sent["delivery_state"] == "sent"
+
+    duplicate_last, last_info = state_helper.queue_followup(
+        source,
+        target_key=f"chat:{target.id}",
+        target_kind="chat",
+        target_context_id=target.id,
+        target_name=target.name or target.id,
+        reason="repeat_request",
+        message=" please   RUN `UNZIP -t /a0/usr/projects/project_1/usr.zip` and report the exit status. ",
+        auto_send=True,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert duplicate_last is False
+    assert last_info["reason"] == "duplicate_last_autonomous"
+
+
+def test_semantic_archive_validation_followups_collapse_even_with_paraphrase(
+    context_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    ctx = make_context(name="Plugin Zipping")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+
+    queued, first = state_helper.queue_followup(
+        ctx,
+        target_key=f"chat:{ctx.id}",
+        target_kind="chat",
+        target_context_id=ctx.id,
+        target_name=ctx.name or ctx.id,
+        reason="archive_validation",
+        message="Run `unzip -t /a0/usr/projects/project_1/usr.zip`, capture the exit code, and report the exact archive path and size.",
+        auto_send=False,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert queued is True
+
+    duplicate, info = state_helper.queue_followup(
+        ctx,
+        target_key=f"chat:{ctx.id}",
+        target_kind="chat",
+        target_context_id=ctx.id,
+        target_name=ctx.name or ctx.id,
+        reason="zip_success_evidence",
+        message="Confirm the archive exists, is readable, and spot-check `plugin.yaml` via `zipinfo` before reporting success.",
+        auto_send=False,
+        source="test",
+        plugin_config=plugin_config,
+    )
+    assert duplicate is False
+    assert info["reason"] == "duplicate_pending"
+    assert info["fingerprint"] == first["fingerprint"]
+
+
+def test_bump_user_turn_resets_autonomy_origin_and_recovery_budget(
+    context_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    ctx = make_context(name="User Turn Chat")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+    state_helper.ensure_state(ctx, plugin_config=plugin_config)
+
+    chat_state = ctx.get_data(CHAT_STATE_KEY)
+    chat_state["active_user_turn"] = 4
+    chat_state["recovery_cycles_used"] = 2
+    chat_state["last_followup_fingerprint"] = "abc123"
+    ctx.set_data(TRANSIENT_AUTONOMY_ORIGIN_KEY, {"fingerprint": "abc123", "reason": "repeat_request"})
+
+    bumped = state_helper.bump_user_turn(ctx, plugin_config=plugin_config)
+
+    assert bumped["active_user_turn"] == 5
+    assert bumped["recovery_cycles_used"] == 0
+    assert ctx.get_data(TRANSIENT_AUTONOMY_ORIGIN_KEY) is None
+    assert ctx.get_output_data(CHAT_STATE_KEY)["active_user_turn"] == 5
+
+
 def test_manual_bridge_of_non_auto_send_item_queues_native_message_without_spending_budget(
     context_factory,
     in_memory_plugin_backend: dict[str, Any],
@@ -1277,6 +1418,167 @@ def test_build_project_rollup_counts_same_project_live_and_allowed_persisted(
     assert rollup["persisted_chat_count"] == 1
     assert rollup["totals"]["chat_todos"] == 1
     assert rollup["totals"]["project_todos"] == 1
+
+
+def test_near_duplicate_plugin_zipping_todos_merge_by_hole_id_in_chat_and_project_scopes(
+    context_factory,
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("zip-dedupe")
+    ctx = make_context(name="Plugin Zipping", project=project_name, profile="pilot")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+    state_helper.ensure_state(ctx, plugin_config=plugin_config)
+
+    first_chat = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Verify destination directory exists and is writable before zipping",
+            "detail": "Check mkdir -p + test -w before archive creation.",
+            "severity": "medium",
+            "source": "audit",
+            "status": "open",
+            "hole_id": "zip-preflight",
+        },
+        plugin_config=plugin_config,
+    )
+    second_chat = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Preflight: verify source and destination readiness for zip",
+            "detail": "Confirm /a0/usr/projects/project_1 is writable before creating the archive.",
+            "severity": "high",
+            "source": "audit",
+            "status": "open",
+            "hole_id": "zip-preflight",
+        },
+        plugin_config=plugin_config,
+    )
+
+    assert len(ctx.get_data("todos")) == 1
+    assert first_chat["id"] == second_chat["id"]
+    assert second_chat["severity"] == "high"
+    assert second_chat["title"] == "Verify destination directory exists and is writable before zipping"
+
+    first_project = project_state.add_or_update_project_todo(
+        ctx,
+        {
+            "title": "Before zipping, verify destination writability",
+            "detail": "Confirm the destination can be created and written to.",
+            "severity": "medium",
+            "source": "audit",
+            "status": "open",
+            "hole_id": "zip-preflight",
+        },
+        plugin_config=plugin_config,
+    )
+    second_project = project_state.add_or_update_project_todo(
+        ctx,
+        {
+            "title": "Preflight destination writability before archiving",
+            "detail": "Use mkdir -p and test -w before any archive run.",
+            "severity": "high",
+            "source": "audit",
+            "status": "open",
+            "hole_id": "zip-preflight",
+        },
+        plugin_config=plugin_config,
+    )
+
+    assert len(project_state.list_project_todos(ctx, status="all")) == 1
+    assert first_project["id"] == second_project["id"]
+    assert second_project["severity"] == "high"
+
+
+def test_semantic_archive_validation_todos_merge_without_shared_hole_id(
+    context_factory,
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("zip-semantic-dedupe")
+    ctx = make_context(name="Plugin Zipping", project=project_name, profile="pilot")
+    plugin_config = copy.deepcopy(SWISS_DEFAULT_CONFIG)
+    state_helper.ensure_state(ctx, plugin_config=plugin_config)
+
+    first = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Run lightweight integrity test on the archive",
+            "detail": "Use `unzip -t` and report the exact archive path plus file size.",
+            "severity": "medium",
+            "source": "audit",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+    second = state_helper.add_or_update_todo(
+        ctx,
+        {
+            "title": "Validate key archive entries before calling the zip done",
+            "detail": "Use `zipinfo` to confirm `plugin.yaml` or `state.json` exists and treat that as success evidence.",
+            "severity": "high",
+            "source": "audit",
+            "status": "open",
+        },
+        plugin_config=plugin_config,
+    )
+
+    assert len(ctx.get_data("todos")) == 1
+    assert first["id"] == second["id"]
+    assert second["severity"] == "high"
+
+
+@pytest.mark.asyncio
+async def test_optional_gate_drift_and_semantic_followup_diagnostics_are_exposed_when_present(
+    context_factory,
+    in_memory_plugin_backend: dict[str, Any],
+    project_name_factory,
+) -> None:
+    make_context, _persisted = context_factory
+    project_name = project_name_factory("optional-diagnostics")
+    in_memory_plugin_backend["store"][("swiss_cheese", project_name, "pilot")] = {
+        "cross_chat_scope": {
+            "same_project_live_write": True,
+            "same_project_persisted_readonly": True,
+            "cross_project": False,
+        }
+    }
+
+    ctx = make_context(name="Helios Hardware", project=project_name, profile="pilot")
+    api = _new_api()
+    payload = await api.process({"action": "get_state", "context_id": ctx.id}, None)
+
+    optional_payloads = {
+        "gate_diagnostics": payload.get("gate_diagnostics"),
+        "context_gate_diagnostics": payload.get("context_window", {}).get("gate_diagnostics"),
+        "confirmation_diagnostics": payload.get("state", {}).get(CTX_CONFIRMATION_KEY, {}).get("diagnostics"),
+        "drift_diagnostics": payload.get("drift_diagnostics"),
+        "outlier_diagnostics": payload.get("outlier_diagnostics"),
+        "followup_diagnostics": payload.get("followup_diagnostics"),
+    }
+    present = {key: value for key, value in optional_payloads.items() if value is not None}
+    if not present:
+        pytest.skip("No optional diagnostics payload is exposed in this backend revision")
+
+    gate_diagnostics = present.get("gate_diagnostics") or present.get("context_gate_diagnostics")
+    if gate_diagnostics is not None:
+        assert isinstance(gate_diagnostics, dict)
+        assert gate_diagnostics
+
+    confirmation_diagnostics = present.get("confirmation_diagnostics")
+    if confirmation_diagnostics is not None:
+        assert isinstance(confirmation_diagnostics, dict)
+        assert confirmation_diagnostics
+
+    drift_diagnostics = present.get("drift_diagnostics") or present.get("outlier_diagnostics")
+    if drift_diagnostics is not None:
+        assert isinstance(drift_diagnostics, dict)
+        assert drift_diagnostics
+
+    followup_diagnostics = present.get("followup_diagnostics")
+    if followup_diagnostics is not None:
+        assert isinstance(followup_diagnostics, dict)
+        assert followup_diagnostics
 
 
 def test_apply_audit_result_adds_project_backlog_and_deduped_current_chat_nudge(

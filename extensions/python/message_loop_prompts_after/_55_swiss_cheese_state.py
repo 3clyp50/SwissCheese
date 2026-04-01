@@ -3,6 +3,7 @@ from agent import LoopData
 
 from usr.plugins.swiss_cheese.helpers import config as swiss_config
 from usr.plugins.swiss_cheese.helpers import context_window, discovery, project_state, state as state_helper
+from usr.plugins.swiss_cheese.helpers.constants import TRANSIENT_USER_TURN_SIGNAL_KEY
 
 
 def _format_holes(holes: list[dict]) -> str:
@@ -24,6 +25,25 @@ def _format_todos(todos: list[dict]) -> str:
         status = todo.get("status", "open")
         lines.append(f"- [{status}] {todo.get('title', '')}")
     return "\n".join(lines)
+
+
+def _format_duplicate_signal(signal: dict) -> str:
+    if not signal or not signal.get("exact_repeat"):
+        return "exact_repeat=no"
+    return (
+        f"exact_repeat=yes previous_message={signal.get('previous_message_excerpt', '')!r} "
+        f"previous_response={signal.get('previous_response_excerpt', '')!r}"
+    )
+
+
+def _format_drift_signal(signal: dict) -> str:
+    if not signal or not signal.get("drift_suspected"):
+        return "drift_suspected=no"
+    return (
+        f"drift_suspected=yes previous_overlap={signal.get('previous_overlap', 0.0)} "
+        f"anchor_overlap={signal.get('anchor_overlap', 0.0)} "
+        f"context={signal.get('context_name', '')!r} project={signal.get('project_title', '')!r}"
+    )
 
 
 class SwissCheesePromptState(Extension):
@@ -61,18 +81,21 @@ class SwissCheesePromptState(Extension):
 
         chat = ctx_status.get("chat_model", {})
         utility = ctx_status.get("utility_model", {})
+        user_turn_signal = self.agent.context.get_data(TRANSIENT_USER_TURN_SIGNAL_KEY) or {}
         prompt = self.agent.read_prompt(
             "agent.context.swiss_cheese.md",
             chat_gate_active="yes" if ctx_status.get("gate_active", False) else "no",
             chat_ctx_summary=(
                 f"{chat.get('provider', '')}/{chat.get('name', '')} "
                 f"confirmed={chat.get('confirmed', False)} "
+                f"reason={chat.get('confirmation_reason', '')} "
                 f"tokens={chat.get('current_tokens', 0)} "
                 f"remaining={chat.get('remaining_budget', 0)}"
             ).strip(),
             utility_ctx_summary=(
                 f"{utility.get('provider', '')}/{utility.get('name', '')} "
                 f"confirmed={utility.get('confirmed', False)} "
+                f"reason={utility.get('confirmation_reason', '')} "
                 f"tokens={utility.get('current_tokens', 0)} "
                 f"remaining={utility.get('remaining_budget', 0)}"
             ).strip(),
@@ -90,5 +113,7 @@ class SwissCheesePromptState(Extension):
             todos_text=_format_todos(self.agent.context.get_data("todos") or []),
             project_summary=project_summary,
             project_todos_text=_format_todos(project_state.list_project_todos(self.agent.context, status="open")),
+            duplicate_signal_summary=_format_duplicate_signal(user_turn_signal),
+            drift_signal_summary=_format_drift_signal(user_turn_signal),
         )
         loop_data.extras_persistent["swiss_cheese"] = prompt
